@@ -1,0 +1,1 @@
+"""Local article briefing processor."""

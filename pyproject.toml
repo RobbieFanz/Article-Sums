@@ -1,0 +1,15 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "article-briefing"
+version = "0.1.0"
+description = "Local Ollama article briefing processor"
+requires-python = ">=3.11"
+
+[project.scripts]
+article-briefing = "article_briefing.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

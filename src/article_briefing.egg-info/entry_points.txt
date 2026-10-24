@@ -1,0 +1,2 @@
+[console_scripts]
+article-briefing = article_briefing.__main__:main
