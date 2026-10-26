@@ -78,16 +78,10 @@ def load_article(path: Path, maximum_characters: int) -> Article:
     if first_content_line is None:
         raise ProcessingError(f"{path.name} is empty.")
 
-    url = lines[first_content_line].strip()
-    parsed_url = urlparse(url)
-    if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
-        raise ProcessingError(
-            f"{path.name} must start with a complete http or https article URL."
-        )
-
-    text = "\n".join(lines[first_content_line + 1 :]).strip()
+    url, text_start_line = optional_url(lines, first_content_line, path)
+    text = "\n".join(lines[text_start_line:]).strip()
     if not text:
-        raise ProcessingError(f"{path.name} has no article text after its URL.")
+        raise ProcessingError(f"{path.name} has no article text.")
 
     was_truncated = len(text) > maximum_characters
     return Article(
@@ -97,6 +91,25 @@ def load_article(path: Path, maximum_characters: int) -> Article:
         text=text[:maximum_characters],
         was_truncated=was_truncated,
     )
+
+
+def optional_url(lines: list[str], first_content_line: int, path: Path) -> tuple[str | None, int]:
+    first_line = lines[first_content_line].strip()
+    if first_line.lower().startswith("url:"):
+        url = first_line[4:].strip()
+        if not is_complete_url(url):
+            raise ProcessingError(
+                f"{path.name} has an invalid URL: header. Use a complete http or https URL."
+            )
+        return url, first_content_line + 1
+    if is_complete_url(first_line):
+        return first_line, first_content_line + 1
+    return None, first_content_line
+
+
+def is_complete_url(value: str) -> bool:
+    parsed_url = urlparse(value)
+    return parsed_url.scheme in {"http", "https"} and bool(parsed_url.netloc)
 
 
 def write_briefing(
@@ -189,8 +202,20 @@ def render_markdown(payload: dict[str, object]) -> str:
 
 
 def render_article_summary(summary: ArticleSummary) -> str:
+    title = (
+        f"[{summary.title}]({summary.url})"
+        if summary.url
+        else summary.title
+    )
+    original_article = (
+        f"**Original article:** {summary.url}"
+        if summary.url
+        else "**Original article:** unavailable"
+    )
     lines = [
-        f"# [{summary.title}]({summary.url})",
+        f"# {title}",
+        "",
+        original_article,
         "",
         "## Summary",
         "",

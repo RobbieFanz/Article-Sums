@@ -34,16 +34,28 @@ overview, then archives the processed article files. It does not send email yet.
 
 ## Landing-file format
 
-Place one or more UTF-8 `.txt` files in `data/landing/`. The first non-empty
-line must be the original `http` or `https` article URL. All remaining text is
-the article content. The filename becomes the article title.
+Place one or more UTF-8 `.txt` files in `data/landing/`. An original article
+URL is optional. When available, use either a `URL:` header or a complete
+`http`/`https` URL as the first non-empty line. The filename becomes the
+article title.
 
 ```text
-https://example.com/articles/new-release
+URL: https://example.com/articles/new-release
 
 Article text begins here.
 It can span multiple lines.
 ```
+
+Files with no URL are also valid:
+
+```text
+Article text begins here.
+It can span multiple lines.
+```
+
+An invalid `URL:` header is reported as a warning and left in the landing
+folder for correction. Individual article summaries show “Original article:
+unavailable” when no URL is provided.
 
 For example, a file named `new-model-release.txt` is displayed as “new model
 release” in the generated briefing.
@@ -88,3 +100,5 @@ still stop the batch without archiving its valid landing files.
 | `MAX_ARTICLE_CHARACTERS` | No | Per-article input cap, default `24000` |
 
 Do not commit `.env`; it may later contain SMTP credentials.
+`.env.example` contains only safe placeholders and should be committed so people
+cloning the project can create their own local configuration.

@@ -68,31 +68,33 @@ class ProcessorTests(unittest.TestCase):
             self.assertNotIn("## Articles", briefing_markdown)
             self.assertIn("article-summaries/", briefing_markdown)
 
-    def test_invalid_file_is_reported_and_remains_in_landing_folder(self) -> None:
+    def test_processes_article_without_a_url(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             settings = make_settings(root)
             settings.landing_dir.mkdir(parents=True)
-            source_file = settings.landing_dir / "invalid.txt"
-            source_file.write_text("Not a URL\n\nArticle text", encoding="utf-8")
+            source_file = settings.landing_dir / "article-without-url.txt"
+            source_file.write_text("Article text without a source URL.", encoding="utf-8")
 
             result = process_landing_folder(settings, FakeSummarizer())
 
-            self.assertIsNone(result.briefing_path)
-            self.assertEqual(
-                result.warnings,
-                ("invalid.txt must start with a complete http or https article URL.",),
-            )
-            self.assertTrue(source_file.exists())
-            self.assertFalse(settings.archive_dir.exists())
+            assert result.briefing_path is not None
+            self.assertEqual(result.warnings, ())
+            self.assertFalse(source_file.exists())
+            briefing = json.loads((result.briefing_path / "briefing.json").read_text())
+            self.assertIsNone(briefing["articles"][0]["url"])
+            summary_markdown = (
+                result.briefing_path / "article-summaries" / "article-without-url.md"
+            ).read_text()
+            self.assertIn("**Original article:** unavailable", summary_markdown)
 
-    def test_invalid_file_does_not_block_valid_article(self) -> None:
+    def test_invalid_url_header_does_not_block_valid_article(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             settings = make_settings(root)
             settings.landing_dir.mkdir(parents=True)
             invalid_file = settings.landing_dir / "invalid.txt"
-            invalid_file.write_text("Missing article URL", encoding="utf-8")
+            invalid_file.write_text("URL: not-a-url\n\nArticle text", encoding="utf-8")
             valid_file = settings.landing_dir / "valid.txt"
             valid_file.write_text(
                 "https://example.com/valid\n\nValid article text.", encoding="utf-8"
@@ -107,9 +109,34 @@ class ProcessorTests(unittest.TestCase):
             assert result.briefing_path is not None
             self.assertTrue(invalid_file.exists())
             self.assertFalse(valid_file.exists())
-            self.assertEqual(len(result.warnings), 1)
+            self.assertEqual(
+                result.warnings,
+                (
+                    "invalid.txt has an invalid URL: header. "
+                    "Use a complete http or https URL.",
+                ),
+            )
             briefing = json.loads((result.briefing_path / "briefing.json").read_text())
             self.assertEqual(briefing["skipped_files"], list(result.warnings))
+
+    def test_url_header_is_saved_as_the_original_article_url(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root)
+            settings.landing_dir.mkdir(parents=True)
+            source_file = settings.landing_dir / "header-url.txt"
+            source_file.write_text(
+                "URL: https://example.com/header-url\n\nArticle text.",
+                encoding="utf-8",
+            )
+
+            result = process_landing_folder(settings, FakeSummarizer())
+
+            assert result.briefing_path is not None
+            briefing = json.loads((result.briefing_path / "briefing.json").read_text())
+            self.assertEqual(
+                briefing["articles"][0]["url"], "https://example.com/header-url"
+            )
 
 
 def make_settings(root: Path) -> Settings:

@@ -7,7 +7,7 @@ from dataclasses import asdict, dataclass
 class Article:
     source_file: str
     title: str
-    url: str
+    url: str | None
     text: str
     was_truncated: bool
 
@@ -15,7 +15,7 @@ class Article:
 @dataclass(frozen=True)
 class ArticleSummary:
     title: str
-    url: str
+    url: str | None
     source_file: str
     summary: str
     key_points: list[str]

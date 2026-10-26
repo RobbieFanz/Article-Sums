@@ -36,7 +36,7 @@ class OllamaClient:
                 '["point 1", "point 2", "point 3"], "why_it_matters": "1 sentence", '
                 '"read_recommendation": "1 sentence"}. Include 2 to 4 key points.\n\n'
                 f"ARTICLE TITLE: {article.title}\n"
-                f"ARTICLE URL: {article.url}\n"
+                f"ARTICLE URL: {article.url or 'Not provided'}\n"
                 f"INPUT NOTE: {input_note}\n"
                 "ARTICLE CONTENT START\n"
                 f"{article.text}\n"
