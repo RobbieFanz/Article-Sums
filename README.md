@@ -52,6 +52,27 @@ both the original linked article URL (when present) and the Hacker News
 discussion URL. Hacker News `topstories` are the current ranked front page, not
 a fixed calendar-day archive.
 
+### Collect Hacker News article text
+
+Fetch the current top stories' public linked pages, extract their readable
+article text, and place successful results in `data/landing/`:
+
+```bash
+hacker-news-collect --limit 10
+```
+
+The collector does not invoke Ollama. Each created landing file begins with the
+final article URL and then contains only extracted readable text, ready for:
+
+```bash
+python -m article_briefing
+```
+
+Stories with no external URL, non-HTML pages, inaccessible pages, duplicate
+landing files, or less than 500 extracted characters are skipped and reported
+in the terminal. The collector does not bypass login pages, paywalls, CAPTCHAs,
+or bot protections.
+
 ## Landing-file format
 
 Place one or more UTF-8 `.txt` files in `data/landing/`. An original article

@@ -9,11 +9,13 @@ description = "Local Ollama article briefing processor"
 requires-python = ">=3.11"
 dependencies = [
     "certifi>=2025.0.0",
+    "trafilatura>=2.0.0",
 ]
 
 [project.scripts]
 article-briefing = "article_briefing.__main__:main"
 hacker-news-top = "article_briefing.hacker_news:main"
+hacker-news-collect = "article_briefing.hacker_news_collect:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
