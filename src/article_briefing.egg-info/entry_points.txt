@@ -1,2 +1,3 @@
 [console_scripts]
 article-briefing = article_briefing.__main__:main
+hacker-news-top = article_briefing.hacker_news:main

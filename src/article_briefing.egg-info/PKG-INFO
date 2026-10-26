@@ -3,3 +3,4 @@ Name: article-briefing
 Version: 0.1.0
 Summary: Local Ollama article briefing processor
 Requires-Python: >=3.11
+Requires-Dist: certifi>=2025.0.0

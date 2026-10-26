@@ -32,6 +32,26 @@ overview, then archives the processed article files. It does not send email yet.
    ollama list
    ```
 
+## Hacker News top stories
+
+Print current Hacker News front-page stories without invoking Ollama or writing
+any files:
+
+```bash
+hacker-news-top
+```
+
+The command defaults to 10 stories. Pass a limit to inspect more:
+
+```bash
+hacker-news-top --limit 20
+```
+
+Each result includes its Hacker News rank, points, comment count, author, and
+both the original linked article URL (when present) and the Hacker News
+discussion URL. Hacker News `topstories` are the current ranked front page, not
+a fixed calendar-day archive.
+
 ## Landing-file format
 
 Place one or more UTF-8 `.txt` files in `data/landing/`. An original article

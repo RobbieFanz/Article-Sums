@@ -3,6 +3,7 @@ pyproject.toml
 src/article_briefing/__init__.py
 src/article_briefing/__main__.py
 src/article_briefing/config.py
+src/article_briefing/hacker_news.py
 src/article_briefing/models.py
 src/article_briefing/ollama.py
 src/article_briefing/processor.py
@@ -10,5 +11,7 @@ src/article_briefing.egg-info/PKG-INFO
 src/article_briefing.egg-info/SOURCES.txt
 src/article_briefing.egg-info/dependency_links.txt
 src/article_briefing.egg-info/entry_points.txt
+src/article_briefing.egg-info/requires.txt
 src/article_briefing.egg-info/top_level.txt
+tests/test_hacker_news.py
 tests/test_processor.py
