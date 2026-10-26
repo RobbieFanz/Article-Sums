@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from time import perf_counter
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -18,6 +19,7 @@ class OllamaClient:
         self._settings = settings
 
     def summarize_article(self, article: Article) -> ArticleSummary:
+        started_at = perf_counter()
         input_note = (
             "The article text was truncated before summarization."
             if article.was_truncated
@@ -52,9 +54,11 @@ class OllamaClient:
             why_it_matters=required_string(response, "why_it_matters"),
             read_recommendation=required_string(response, "read_recommendation"),
             input_note=input_note,
+            summarization_duration_seconds=perf_counter() - started_at,
         )
 
     def summarize_briefing(self, summaries: list[ArticleSummary]) -> BriefingOverview:
+        started_at = perf_counter()
         summary_payload = [
             {
                 "title": summary.title,
@@ -88,6 +92,7 @@ class OllamaClient:
             overview=required_string(response, "overview"),
             major_themes=string_list(response, "major_themes", minimum=2, maximum=3),
             watch_for=required_string(response, "watch_for"),
+            summarization_duration_seconds=perf_counter() - started_at,
         )
 
     def _request_json(self, system_prompt: str, user_prompt: str) -> dict[str, Any]:

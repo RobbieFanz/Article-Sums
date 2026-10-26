@@ -1,12 +1,60 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
 class ConfigurationError(ValueError):
     """Raised when configuration is missing or invalid."""
+
+
+@dataclass(frozen=True)
+class SmtpSettings:
+    enabled: bool
+    host: str | None = None
+    port: int = 587
+    username: str | None = None
+    password: str | None = None
+    from_address: str | None = None
+    to_addresses: tuple[str, ...] = ()
+    use_starttls: bool = True
+    use_ssl: bool = False
+    timeout_seconds: float = 30
+
+    @classmethod
+    def from_environment(cls) -> "SmtpSettings":
+        enabled = boolean_environment("SMTP_ENABLED", False)
+        if not enabled:
+            return cls(enabled=False)
+
+        recipients = tuple(
+            address.strip()
+            for address in required_environment("SMTP_TO").split(",")
+            if address.strip()
+        )
+        if not recipients:
+            raise ConfigurationError("SMTP_TO must include at least one recipient address.")
+
+        use_starttls = boolean_environment("SMTP_USE_STARTTLS", True)
+        use_ssl = boolean_environment("SMTP_USE_SSL", False)
+        if use_starttls and use_ssl:
+            raise ConfigurationError(
+                "SMTP_USE_STARTTLS and SMTP_USE_SSL cannot both be true."
+            )
+
+        return cls(
+            enabled=True,
+            host=required_environment("SMTP_HOST"),
+            port=positive_integer("SMTP_PORT", 587),
+            username=required_environment("SMTP_USERNAME"),
+            password=required_environment("SMTP_PASSWORD"),
+            from_address=required_environment("SMTP_FROM"),
+            to_addresses=recipients,
+            use_starttls=use_starttls,
+            use_ssl=use_ssl,
+            timeout_seconds=positive_float("SMTP_TIMEOUT_SECONDS", 30),
+        )
 
 
 @dataclass(frozen=True)
@@ -19,6 +67,7 @@ class Settings:
     archive_dir: Path
     briefing_dir: Path
     max_article_characters: int
+    smtp: SmtpSettings = field(default_factory=lambda: SmtpSettings(enabled=False))
 
     @classmethod
     def from_environment(cls, project_root: Path) -> "Settings":
@@ -45,6 +94,7 @@ class Settings:
                 project_root, os.getenv("BRIEFING_DIR", "data/briefings")
             ),
             max_article_characters=maximum_characters,
+            smtp=SmtpSettings.from_environment(),
         )
 
 
@@ -98,6 +148,20 @@ def positive_integer(name: str, default: int) -> int:
     if parsed <= 0:
         raise ConfigurationError(f"{name} must be greater than zero.")
     return parsed
+
+
+def boolean_environment(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ConfigurationError(
+        f"{name} must be one of: true, false, 1, 0, yes, no, on, or off."
+    )
 
 
 def resolve_project_path(project_root: Path, value: str) -> Path:

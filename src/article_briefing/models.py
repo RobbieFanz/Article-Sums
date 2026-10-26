@@ -22,6 +22,7 @@ class ArticleSummary:
     why_it_matters: str
     read_recommendation: str
     input_note: str
+    summarization_duration_seconds: float = 0.0
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -32,6 +33,22 @@ class BriefingOverview:
     overview: str
     major_themes: list[str]
     watch_for: str
+    summarization_duration_seconds: float = 0.0
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class Briefing:
+    created_at: str
+    model: str
+    overview: BriefingOverview
+    articles: list[ArticleSummary]
+    skipped_files: list[str]
+    generation_duration_seconds: float
+    total_duration_seconds: float | None = None
+    email_delivery_duration_seconds: float | None = None
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)

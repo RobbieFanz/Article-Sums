@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 from article_briefing.config import ConfigurationError, Settings
+from article_briefing.email_delivery import EmailDeliveryError, SmtpBriefingSender
 from article_briefing.ollama import OllamaClient, OllamaError
 from article_briefing.processor import ProcessingError, process_landing_folder
 
@@ -12,8 +13,9 @@ def main() -> None:
     project_root = Path.cwd()
     try:
         settings = Settings.from_environment(project_root)
-        result = process_landing_folder(settings, OllamaClient(settings))
-    except (ConfigurationError, OllamaError, ProcessingError) as error:
+        sender = SmtpBriefingSender(settings.smtp) if settings.smtp.enabled else None
+        result = process_landing_folder(settings, OllamaClient(settings), sender=sender)
+    except (ConfigurationError, EmailDeliveryError, OllamaError, ProcessingError) as error:
         print(f"Error: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 
@@ -33,6 +35,10 @@ def main() -> None:
         )
         return
     print(f"Created briefing: {result.briefing_path}")
+    print(f"Briefing generation time: {result.generation_duration_seconds:.1f} seconds")
+    print(f"Total process time: {result.total_duration_seconds:.1f} seconds")
+    if result.email_delivery_duration_seconds is not None:
+        print(f"SMTP delivery time: {result.email_delivery_duration_seconds:.1f} seconds")
 
 
 if __name__ == "__main__":

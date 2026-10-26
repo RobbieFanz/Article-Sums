@@ -122,6 +122,10 @@ On success, the command:
 files in `article-summaries/` to review each article's complete summary, key
 points, relevance, and read recommendation.
 
+The briefing output includes the overall generation time, total process time,
+overview summarization time, and an individual Ollama duration for every
+article summary. When email is enabled, it also records SMTP delivery time.
+
 Malformed landing files do not stop valid files from being processed. The
 command prints a warning, includes the warning in `briefing.json`, and leaves
 each malformed file in `data/landing/` for correction. Only successfully
@@ -139,7 +143,33 @@ still stop the batch without archiving its valid landing files.
 | `ARCHIVE_DIR` | No | Archived input directory, default `data/archive` |
 | `BRIEFING_DIR` | No | Generated briefing directory, default `data/briefings` |
 | `MAX_ARTICLE_CHARACTERS` | No | Per-article input cap, default `24000` |
+| `SMTP_ENABLED` | No | Set to `true` to email a successfully generated briefing |
+| `SMTP_HOST` | When enabled | SMTP hostname, for example your mail provider's SMTP server |
+| `SMTP_PORT` | When enabled | SMTP port, default `587` |
+| `SMTP_USERNAME` | When enabled | SMTP login username |
+| `SMTP_PASSWORD` | When enabled | SMTP password or provider app password |
+| `SMTP_FROM` | When enabled | Sender email address |
+| `SMTP_TO` | When enabled | Comma-separated recipient email addresses |
+| `SMTP_USE_STARTTLS` | No | Use STARTTLS for SMTP, default `true` |
+| `SMTP_USE_SSL` | No | Use implicit SSL/TLS, default `false`; do not enable with STARTTLS |
+| `SMTP_TIMEOUT_SECONDS` | No | SMTP connection timeout, default `30` |
 
 Do not commit `.env`; it may later contain SMTP credentials.
 `.env.example` contains only safe placeholders and should be committed so people
 cloning the project can create their own local configuration.
+
+## SMTP email delivery
+
+Email is disabled by default. To enable it, copy the SMTP values from your mail
+provider into your ignored `.env` file and set:
+
+```dotenv
+SMTP_ENABLED=true
+```
+
+Use an app password when your provider requires one; do not use or commit a
+personal account password. When SMTP is enabled, the generated briefing email
+contains the short overview followed by the individual article summaries and
+their timings. Source files move from `data/landing/` to `data/archive/` only
+after SMTP delivery succeeds. If delivery fails, the files remain in the
+landing folder for a later retry.

@@ -4,11 +4,12 @@ import json
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from time import perf_counter
 from typing import Protocol
 from urllib.parse import urlparse
 
 from article_briefing.config import Settings
-from article_briefing.models import Article, ArticleSummary, BriefingOverview
+from article_briefing.models import Article, ArticleSummary, Briefing, BriefingOverview
 
 
 class ProcessingError(RuntimeError):
@@ -19,6 +20,9 @@ class ProcessingError(RuntimeError):
 class ProcessingResult:
     briefing_path: Path | None
     warnings: tuple[str, ...]
+    generation_duration_seconds: float | None = None
+    total_duration_seconds: float | None = None
+    email_delivery_duration_seconds: float | None = None
 
 
 class Summarizer(Protocol):
@@ -27,9 +31,17 @@ class Summarizer(Protocol):
     def summarize_briefing(self, summaries: list[ArticleSummary]) -> BriefingOverview: ...
 
 
+class BriefingSender(Protocol):
+    def send(self, briefing: Briefing) -> float: ...
+
+
 def process_landing_folder(
-    settings: Settings, summarizer: Summarizer, now: datetime | None = None
+    settings: Settings,
+    summarizer: Summarizer,
+    now: datetime | None = None,
+    sender: BriefingSender | None = None,
 ) -> ProcessingResult:
+    started_at = perf_counter()
     settings.landing_dir.mkdir(parents=True, exist_ok=True)
     landing_files = sorted(settings.landing_dir.glob("*.txt"))
     if not landing_files:
@@ -61,9 +73,37 @@ def process_landing_folder(
             f"Briefing timestamp collision at {timestamp}. Rerun the command."
         )
 
-    write_briefing(briefing_path, settings, timestamp, summaries, overview, warnings)
+    generation_duration_seconds = perf_counter() - started_at
+    briefing = Briefing(
+        created_at=timestamp,
+        model=settings.ollama_model,
+        overview=overview,
+        articles=summaries,
+        skipped_files=warnings,
+        generation_duration_seconds=generation_duration_seconds,
+    )
+    create_briefing_directory(briefing_path)
+    write_briefing(briefing_path, briefing)
+    email_delivery_duration_seconds = sender.send(briefing) if sender else None
     archive_files(processed_files, archive_path)
-    return ProcessingResult(briefing_path=briefing_path, warnings=tuple(warnings))
+    completed_briefing = Briefing(
+        created_at=briefing.created_at,
+        model=briefing.model,
+        overview=briefing.overview,
+        articles=briefing.articles,
+        skipped_files=briefing.skipped_files,
+        generation_duration_seconds=briefing.generation_duration_seconds,
+        total_duration_seconds=perf_counter() - started_at,
+        email_delivery_duration_seconds=email_delivery_duration_seconds,
+    )
+    write_briefing(briefing_path, completed_briefing)
+    return ProcessingResult(
+        briefing_path=briefing_path,
+        warnings=tuple(warnings),
+        generation_duration_seconds=completed_briefing.generation_duration_seconds,
+        total_duration_seconds=completed_briefing.total_duration_seconds,
+        email_delivery_duration_seconds=email_delivery_duration_seconds,
+    )
 
 
 def load_article(path: Path, maximum_characters: int) -> Article:
@@ -112,29 +152,22 @@ def is_complete_url(value: str) -> bool:
     return parsed_url.scheme in {"http", "https"} and bool(parsed_url.netloc)
 
 
-def write_briefing(
-    briefing_path: Path,
-    settings: Settings,
-    timestamp: str,
-    summaries: list[ArticleSummary],
-    overview: BriefingOverview,
-    warnings: list[str],
-) -> None:
-    briefing_path.mkdir(parents=True, exist_ok=False)
-    payload = {
-        "created_at": timestamp,
-        "model": settings.ollama_model,
-        "overview": overview.as_dict(),
-        "articles": [summary.as_dict() for summary in summaries],
-        "skipped_files": warnings,
-    }
+def create_briefing_directory(briefing_path: Path) -> None:
+    try:
+        briefing_path.mkdir(parents=True, exist_ok=False)
+    except OSError as error:
+        raise ProcessingError(f"Could not create briefing output: {error}") from error
+
+
+def write_briefing(briefing_path: Path, briefing: Briefing) -> None:
+    payload = briefing.as_dict()
     try:
         write_text(
             briefing_path / "briefing.json",
             json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
         )
         write_text(briefing_path / "briefing.md", render_markdown(payload))
-        write_article_summaries(briefing_path / "article-summaries", summaries)
+        write_article_summaries(briefing_path / "article-summaries", briefing.articles)
     except OSError as error:
         raise ProcessingError(f"Could not write briefing output: {error}") from error
 
@@ -170,7 +203,7 @@ def write_text(path: Path, content: str) -> None:
 def write_article_summaries(
     summaries_path: Path, summaries: list[ArticleSummary]
 ) -> None:
-    summaries_path.mkdir(exist_ok=False)
+    summaries_path.mkdir(exist_ok=True)
     for summary in summaries:
         filename = f"{Path(summary.source_file).stem}.md"
         write_text(summaries_path / filename, render_article_summary(summary))
@@ -185,6 +218,18 @@ def render_markdown(payload: dict[str, object]) -> str:
         "",
         f"Created: {payload['created_at']}",
         f"Model: `{payload['model']}`",
+        f"Briefing generation time: {format_seconds(payload['generation_duration_seconds'])}",
+        (
+            f"Total process time: {format_seconds(payload['total_duration_seconds'])}"
+            if payload["total_duration_seconds"] is not None
+            else ""
+        ),
+        (
+            "SMTP delivery time: "
+            f"{format_seconds(payload['email_delivery_duration_seconds'])}"
+            if payload["email_delivery_duration_seconds"] is not None
+            else ""
+        ),
         "",
         "## Overview",
         "",
@@ -233,6 +278,16 @@ def render_article_summary(summary: ArticleSummary) -> str:
         "",
         summary.read_recommendation,
         "",
+        (
+            "**Summarization time:** "
+            f"{format_seconds(summary.summarization_duration_seconds)}"
+        ),
+        "",
         f"*{summary.input_note}*",
     ]
     return "\n".join(lines) + "\n"
+
+
+def format_seconds(duration_seconds: object) -> str:
+    assert isinstance(duration_seconds, (int, float))
+    return f"{duration_seconds:.1f} seconds"

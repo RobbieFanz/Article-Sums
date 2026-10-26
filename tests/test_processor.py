@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from article_briefing.config import Settings
+from article_briefing.email_delivery import EmailDeliveryError
 from article_briefing.models import Article, ArticleSummary, BriefingOverview
 from article_briefing.processor import ProcessingError, process_landing_folder
 
@@ -30,6 +31,22 @@ class FakeSummarizer:
             major_themes=["A major theme.", "A second theme."],
             watch_for="Watch for follow-up coverage.",
         )
+
+
+class FakeSender:
+    def __init__(self, source_file: Path, duration_seconds: float = 0.25) -> None:
+        self.source_file = source_file
+        self.duration_seconds = duration_seconds
+        self.was_source_file_present_when_sent = False
+
+    def send(self, briefing: object) -> float:
+        self.was_source_file_present_when_sent = self.source_file.exists()
+        return self.duration_seconds
+
+
+class FailingSender:
+    def send(self, briefing: object) -> float:
+        raise EmailDeliveryError("SMTP service unavailable")
 
 
 class ProcessorTests(unittest.TestCase):
@@ -67,6 +84,13 @@ class ProcessorTests(unittest.TestCase):
             briefing_markdown = (briefing_path / "briefing.md").read_text()
             self.assertNotIn("## Articles", briefing_markdown)
             self.assertIn("article-summaries/", briefing_markdown)
+            self.assertGreater(briefing["generation_duration_seconds"], 0)
+            self.assertGreater(briefing["total_duration_seconds"], 0)
+            self.assertEqual(briefing["email_delivery_duration_seconds"], None)
+            self.assertIn(
+                "**Summarization time:** 0.0 seconds",
+                (briefing_path / "article-summaries" / "model-release.md").read_text(),
+            )
 
     def test_processes_article_without_a_url(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -137,6 +161,45 @@ class ProcessorTests(unittest.TestCase):
             self.assertEqual(
                 briefing["articles"][0]["url"], "https://example.com/header-url"
             )
+
+    def test_sends_before_archiving_and_records_delivery_timing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root)
+            settings.landing_dir.mkdir(parents=True)
+            source_file = settings.landing_dir / "email-test.txt"
+            source_file.write_text(
+                "https://example.com/email-test\n\nArticle text.",
+                encoding="utf-8",
+            )
+            sender = FakeSender(source_file)
+
+            result = process_landing_folder(settings, FakeSummarizer(), sender=sender)
+
+            assert result.briefing_path is not None
+            self.assertTrue(sender.was_source_file_present_when_sent)
+            self.assertFalse(source_file.exists())
+            self.assertEqual(result.email_delivery_duration_seconds, 0.25)
+            briefing = json.loads((result.briefing_path / "briefing.json").read_text())
+            self.assertEqual(briefing["email_delivery_duration_seconds"], 0.25)
+            self.assertGreater(briefing["total_duration_seconds"], 0)
+
+    def test_delivery_failure_keeps_source_file_in_landing_folder(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root)
+            settings.landing_dir.mkdir(parents=True)
+            source_file = settings.landing_dir / "email-failure.txt"
+            source_file.write_text(
+                "https://example.com/email-failure\n\nArticle text.",
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(EmailDeliveryError):
+                process_landing_folder(settings, FakeSummarizer(), sender=FailingSender())
+
+            self.assertTrue(source_file.exists())
+            self.assertFalse(settings.archive_dir.exists())
 
 
 def make_settings(root: Path) -> Settings:
