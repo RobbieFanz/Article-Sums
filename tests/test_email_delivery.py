@@ -37,6 +37,43 @@ class SmtpBriefingSenderTests(unittest.TestCase):
         self.assertIn("Overview summarization time: 0 minutes 1.5 seconds", body)
         self.assertIn("Summarization time: 0 minutes 3.2 seconds", body)
 
+    def test_plain_text_lists_articles_not_included(self) -> None:
+        briefing = make_briefing()
+        briefing = Briefing(
+            created_at=briefing.created_at,
+            model=briefing.model,
+            overview=briefing.overview,
+            articles=briefing.articles,
+            skipped_files=["failed.txt could not be summarized after 2 attempts."],
+            generation_duration_seconds=briefing.generation_duration_seconds,
+        )
+
+        body = render_plain_text(briefing)
+
+        self.assertIn("ARTICLES NOT INCLUDED", body)
+        self.assertIn("failed.txt could not be summarized after 2 attempts.", body)
+
+    def test_plain_text_reports_briefing_overview_error(self) -> None:
+        briefing = make_briefing()
+        briefing = Briefing(
+            created_at=briefing.created_at,
+            model=briefing.model,
+            overview=BriefingOverview(
+                overview="The combined briefing could not be created.",
+                major_themes=[],
+                watch_for="Review the individual article summaries below.",
+                error="Ollama response was invalid.",
+            ),
+            articles=briefing.articles,
+            skipped_files=[],
+            generation_duration_seconds=briefing.generation_duration_seconds,
+        )
+
+        body = render_plain_text(briefing)
+
+        self.assertIn("BRIEFING OVERVIEW ERROR", body)
+        self.assertIn("Ollama response was invalid.", body)
+
 
 def make_smtp_settings() -> SmtpSettings:
     return SmtpSettings(

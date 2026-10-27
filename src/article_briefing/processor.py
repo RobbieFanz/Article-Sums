@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 from article_briefing.config import Settings
 from article_briefing.models import Article, ArticleSummary, Briefing, BriefingOverview
+from article_briefing.ollama import OllamaError
 
 
 class ProcessingError(RuntimeError):
@@ -62,8 +63,22 @@ def process_landing_folder(
     if not articles:
         return ProcessingResult(briefing_path=None, warnings=tuple(warnings))
 
-    summaries = [summarizer.summarize_article(article) for article in articles]
-    overview = summarizer.summarize_briefing(summaries)
+    summaries: list[ArticleSummary] = []
+    summarized_files: list[Path] = []
+    for article, source_file in zip(articles, processed_files, strict=True):
+        try:
+            summaries.append(summarize_article_with_retry(summarizer, article))
+        except OllamaError as error:
+            warnings.append(
+                f"{source_file.name} could not be summarized after 2 attempts: {error}"
+            )
+            continue
+        summarized_files.append(source_file)
+
+    if not summaries:
+        return ProcessingResult(briefing_path=None, warnings=tuple(warnings))
+
+    overview = summarize_briefing_with_retry(summarizer, summaries)
 
     timestamp = (now or datetime.now().astimezone()).strftime("%Y-%m-%d_%H%M%S%z")
     briefing_path = settings.briefing_dir / timestamp
@@ -85,7 +100,7 @@ def process_landing_folder(
     create_briefing_directory(briefing_path)
     write_briefing(briefing_path, briefing)
     email_delivery_duration_seconds = sender.send(briefing) if sender else None
-    archive_files(processed_files, archive_path)
+    archive_files(summarized_files, archive_path)
     completed_briefing = Briefing(
         created_at=briefing.created_at,
         model=briefing.model,
@@ -130,6 +145,35 @@ def load_article(path: Path, maximum_characters: int) -> Article:
         url=url,
         text=text[:maximum_characters],
         was_truncated=was_truncated,
+    )
+
+
+def summarize_article_with_retry(summarizer: Summarizer, article: Article) -> ArticleSummary:
+    last_error: OllamaError | None = None
+    for _ in range(2):
+        try:
+            return summarizer.summarize_article(article)
+        except OllamaError as error:
+            last_error = error
+    assert last_error is not None
+    raise last_error
+
+
+def summarize_briefing_with_retry(
+    summarizer: Summarizer, summaries: list[ArticleSummary]
+) -> BriefingOverview:
+    last_error: OllamaError | None = None
+    for _ in range(2):
+        try:
+            return summarizer.summarize_briefing(summaries)
+        except OllamaError as error:
+            last_error = error
+    assert last_error is not None
+    return BriefingOverview(
+        overview="The combined briefing could not be created.",
+        major_themes=[],
+        watch_for="Review the individual article summaries below.",
+        error=str(last_error),
     )
 
 
@@ -234,15 +278,46 @@ def render_markdown(payload: dict[str, object]) -> str:
         "## Overview",
         "",
         str(overview["overview"]),
-        "",
-        "### Major themes",
-        "",
-        *[f"- {theme}" for theme in overview["major_themes"]],
-        "",
-        f"**Watch for:** {overview['watch_for']}",
-        "",
-        "Individual article summaries are in [`article-summaries/`](article-summaries/).",
     ]
+    overview_error = overview["error"]
+    assert overview_error is None or isinstance(overview_error, str)
+    if overview_error:
+        lines.extend(
+            [
+                "",
+                "## Briefing overview error",
+                "",
+                f"The combined briefing could not be created: {overview_error}",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "### Major themes",
+                "",
+                *[f"- {theme}" for theme in overview["major_themes"]],
+                "",
+                f"**Watch for:** {overview['watch_for']}",
+            ]
+        )
+    lines.extend(
+        [
+            "",
+            "Individual article summaries are in [`article-summaries/`](article-summaries/).",
+        ]
+    )
+    skipped_files = payload["skipped_files"]
+    assert isinstance(skipped_files, list)
+    if skipped_files:
+        lines.extend(
+            [
+                "",
+                "## Articles not included",
+                "",
+                *[f"- {warning}" for warning in skipped_files],
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 

@@ -25,8 +25,8 @@ def main() -> None:
     if result.briefing_path is None:
         if result.warnings:
             print(
-                f"No valid .txt files found in {settings.landing_dir}. "
-                "Correct the warned files and run the command again."
+                f"No articles were summarized from {settings.landing_dir}. "
+                "Review the warnings and run the command again."
             )
             return
         print(

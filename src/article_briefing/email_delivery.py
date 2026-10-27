@@ -57,18 +57,30 @@ def render_plain_text(briefing: Briefing) -> str:
         "",
         "OVERVIEW",
         briefing.overview.overview,
-        "",
-        "MAJOR THEMES",
-        *[f"- {theme}" for theme in briefing.overview.major_themes],
-        "",
-        f"WATCH FOR: {briefing.overview.watch_for}",
-        (
-            "Overview summarization time: "
-            f"{format_seconds(briefing.overview.summarization_duration_seconds)}"
-        ),
-        "",
-        "ARTICLE SUMMARIES",
     ]
+    if briefing.overview.error:
+        lines.extend(
+            [
+                "",
+                "BRIEFING OVERVIEW ERROR",
+                f"The combined briefing could not be created: {briefing.overview.error}",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "",
+                "MAJOR THEMES",
+                *[f"- {theme}" for theme in briefing.overview.major_themes],
+                "",
+                f"WATCH FOR: {briefing.overview.watch_for}",
+                (
+                    "Overview summarization time: "
+                    f"{format_seconds(briefing.overview.summarization_duration_seconds)}"
+                ),
+            ]
+        )
+    lines.extend(["", "ARTICLE SUMMARIES"])
     for article in briefing.articles:
         lines.extend(
             [
@@ -84,6 +96,14 @@ def render_plain_text(briefing: Briefing) -> str:
                 article.input_note,
             ]
         )
+    if briefing.skipped_files:
+        lines.extend(
+            [
+                "",
+                "ARTICLES NOT INCLUDED",
+                *[f"- {warning}" for warning in briefing.skipped_files],
+            ]
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -92,6 +112,26 @@ def render_html(briefing: Briefing) -> str:
         f"<li>{html.escape(theme)}</li>" for theme in briefing.overview.major_themes
     )
     article_sections = "".join(render_article_html(article) for article in briefing.articles)
+    overview_details = (
+        "<h2>Briefing overview error</h2>"
+        "<p>The combined briefing could not be created: "
+        f"{html.escape(briefing.overview.error)}</p>"
+        if briefing.overview.error
+        else (
+            "<h3>Major themes</h3>"
+            f"<ul>{theme_items}</ul>"
+            f"<p><strong>Watch for:</strong> {html.escape(briefing.overview.watch_for)}<br>"
+            "<strong>Overview summarization time:</strong> "
+            f"{html.escape(format_seconds(briefing.overview.summarization_duration_seconds))}</p>"
+        )
+    )
+    skipped_sections = (
+        "<h2>Articles not included</h2><ul>"
+        + "".join(f"<li>{html.escape(warning)}</li>" for warning in briefing.skipped_files)
+        + "</ul>"
+        if briefing.skipped_files
+        else ""
+    )
     return f"""\
 <!doctype html>
 <html>
@@ -103,13 +143,10 @@ def render_html(briefing: Briefing) -> str:
     {html.escape(format_seconds(briefing.generation_duration_seconds))}</p>
     <h2>Overview</h2>
     <p>{html.escape(briefing.overview.overview)}</p>
-    <h3>Major themes</h3>
-    <ul>{theme_items}</ul>
-    <p><strong>Watch for:</strong> {html.escape(briefing.overview.watch_for)}<br>
-    <strong>Overview summarization time:</strong>
-    {html.escape(format_seconds(briefing.overview.summarization_duration_seconds))}</p>
+    {overview_details}
     <h2>Article summaries</h2>
     {article_sections}
+    {skipped_sections}
   </body>
 </html>
 """

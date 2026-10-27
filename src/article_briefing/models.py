@@ -34,6 +34,7 @@ class BriefingOverview:
     major_themes: list[str]
     watch_for: str
     summarization_duration_seconds: float = 0.0
+    error: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)

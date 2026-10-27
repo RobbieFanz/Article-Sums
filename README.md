@@ -126,6 +126,15 @@ The briefing output includes the overall generation time, total process time,
 overview summarization time, and an individual Ollama duration for every
 article summary. When email is enabled, it also records SMTP delivery time.
 
+If Ollama returns an invalid individual article summary, the program retries
+that article once. If the second attempt also fails, it continues with the
+remaining articles, leaves the failed source file in `data/landing/`, and lists
+the failure under “Articles not included” in the saved briefing and email.
+
+The combined briefing overview is also retried once. If both attempts fail, the
+email and saved briefing state the overview error and still include every valid
+individual article summary.
+
 Malformed landing files do not stop valid files from being processed. The
 command prints a warning, includes the warning in `briefing.json`, and leaves
 each malformed file in `data/landing/` for correction. Only successfully

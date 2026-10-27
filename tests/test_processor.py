@@ -9,6 +9,7 @@ from pathlib import Path
 from article_briefing.config import Settings
 from article_briefing.email_delivery import EmailDeliveryError
 from article_briefing.models import Article, ArticleSummary, BriefingOverview
+from article_briefing.ollama import OllamaError
 from article_briefing.processor import ProcessingError, process_landing_folder
 
 
@@ -47,6 +48,33 @@ class FakeSender:
 class FailingSender:
     def send(self, briefing: object) -> float:
         raise EmailDeliveryError("SMTP service unavailable")
+
+
+class RetrySummarizer(FakeSummarizer):
+    def __init__(self, failures_by_file: dict[str, int]) -> None:
+        self.failures_by_file = failures_by_file
+        self.calls_by_file: dict[str, int] = {}
+
+    def summarize_article(self, article: Article) -> ArticleSummary:
+        calls = self.calls_by_file.get(article.source_file, 0) + 1
+        self.calls_by_file[article.source_file] = calls
+        if calls <= self.failures_by_file.get(article.source_file, 0):
+            raise OllamaError("Ollama response field 'summary' must be a non-empty string.")
+        return super().summarize_article(article)
+
+
+class OverviewRetrySummarizer(FakeSummarizer):
+    def __init__(self, failures: int) -> None:
+        self.failures = failures
+        self.calls = 0
+
+    def summarize_briefing(self, summaries: list[ArticleSummary]) -> BriefingOverview:
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise OllamaError(
+                "Ollama response field 'overview' must be a non-empty string."
+            )
+        return super().summarize_briefing(summaries)
 
 
 class ProcessorTests(unittest.TestCase):
@@ -200,6 +228,101 @@ class ProcessorTests(unittest.TestCase):
 
             self.assertTrue(source_file.exists())
             self.assertFalse(settings.archive_dir.exists())
+
+    def test_retries_an_article_once_before_succeeding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root)
+            settings.landing_dir.mkdir(parents=True)
+            source_file = settings.landing_dir / "retry.txt"
+            source_file.write_text(
+                "https://example.com/retry\n\nArticle text.",
+                encoding="utf-8",
+            )
+            summarizer = RetrySummarizer({"retry.txt": 1})
+
+            result = process_landing_folder(settings, summarizer)
+
+            assert result.briefing_path is not None
+            self.assertEqual(summarizer.calls_by_file["retry.txt"], 2)
+            self.assertFalse(source_file.exists())
+            self.assertEqual(result.warnings, ())
+
+    def test_skips_failed_article_after_two_attempts_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root)
+            settings.landing_dir.mkdir(parents=True)
+            failed_file = settings.landing_dir / "failed.txt"
+            failed_file.write_text(
+                "https://example.com/failed\n\nFailed article text.",
+                encoding="utf-8",
+            )
+            valid_file = settings.landing_dir / "valid.txt"
+            valid_file.write_text(
+                "https://example.com/valid\n\nValid article text.",
+                encoding="utf-8",
+            )
+            summarizer = RetrySummarizer({"failed.txt": 2})
+
+            result = process_landing_folder(settings, summarizer)
+
+            assert result.briefing_path is not None
+            self.assertEqual(summarizer.calls_by_file["failed.txt"], 2)
+            self.assertTrue(failed_file.exists())
+            self.assertFalse(valid_file.exists())
+            self.assertEqual(len(result.warnings), 1)
+            self.assertIn("failed.txt could not be summarized after 2 attempts", result.warnings[0])
+            briefing_markdown = (result.briefing_path / "briefing.md").read_text()
+            self.assertIn("## Articles not included", briefing_markdown)
+            self.assertIn("failed.txt could not be summarized", briefing_markdown)
+
+    def test_retries_briefing_overview_once_before_succeeding(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root)
+            settings.landing_dir.mkdir(parents=True)
+            source_file = settings.landing_dir / "overview-retry.txt"
+            source_file.write_text(
+                "https://example.com/overview-retry\n\nArticle text.",
+                encoding="utf-8",
+            )
+            summarizer = OverviewRetrySummarizer(failures=1)
+
+            result = process_landing_folder(settings, summarizer)
+
+            assert result.briefing_path is not None
+            self.assertEqual(summarizer.calls, 2)
+            briefing = json.loads((result.briefing_path / "briefing.json").read_text())
+            self.assertIsNone(briefing["overview"]["error"])
+
+    def test_sends_valid_articles_when_briefing_overview_fails_twice(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root)
+            settings.landing_dir.mkdir(parents=True)
+            source_file = settings.landing_dir / "overview-failure.txt"
+            source_file.write_text(
+                "https://example.com/overview-failure\n\nArticle text.",
+                encoding="utf-8",
+            )
+            summarizer = OverviewRetrySummarizer(failures=2)
+
+            result = process_landing_folder(settings, summarizer)
+
+            assert result.briefing_path is not None
+            self.assertEqual(summarizer.calls, 2)
+            self.assertFalse(source_file.exists())
+            briefing = json.loads((result.briefing_path / "briefing.json").read_text())
+            self.assertEqual(
+                briefing["overview"]["error"],
+                "Ollama response field 'overview' must be a non-empty string.",
+            )
+            briefing_markdown = (result.briefing_path / "briefing.md").read_text()
+            self.assertIn("## Briefing overview error", briefing_markdown)
+            self.assertTrue(
+                (result.briefing_path / "article-summaries" / "overview-failure.md").exists()
+            )
 
 
 def make_settings(root: Path) -> Settings:
