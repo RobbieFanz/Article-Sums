@@ -50,7 +50,7 @@ class OllamaClient:
             url=article.url,
             source_file=article.source_file,
             summary=required_string(response, "summary"),
-            key_points=string_list(response, "key_points", minimum=1, maximum=8),
+            key_points=key_points_or_fallback(response),
             why_it_matters=required_string(response, "why_it_matters"),
             read_recommendation=required_string(response, "read_recommendation"),
             input_note=input_note,
@@ -157,3 +157,16 @@ def string_list(
     if not all(isinstance(item, str) and item.strip() for item in value):
         raise OllamaError(f"Ollama response field {field!r} must contain non-empty strings.")
     return [item.strip() for item in value]
+
+
+def key_points_or_fallback(payload: dict[str, Any]) -> list[str]:
+    value = payload.get("key_points")
+    if not isinstance(value, list):
+        return ["No key points were found given."]
+
+    key_points = [
+        item.strip()
+        for item in value
+        if isinstance(item, str) and item.strip()
+    ][:8]
+    return key_points or ["No key points were found given."]

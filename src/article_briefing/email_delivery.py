@@ -6,6 +6,8 @@ import ssl
 from email.message import EmailMessage
 from time import perf_counter
 
+import certifi
+
 from article_briefing.config import SmtpSettings
 from article_briefing.models import ArticleSummary, Briefing
 
@@ -30,6 +32,7 @@ class SmtpBriefingSender:
 
         started_at = perf_counter()
         smtp_class = smtplib.SMTP_SSL if self._settings.use_ssl else smtplib.SMTP
+        tls_context = ssl.create_default_context(cafile=certifi.where())
         try:
             with smtp_class(
                 self._settings.host,
@@ -37,7 +40,7 @@ class SmtpBriefingSender:
                 timeout=self._settings.timeout_seconds,
             ) as client:
                 if self._settings.use_starttls:
-                    client.starttls(context=ssl.create_default_context())
+                    client.starttls(context=tls_context)
                 client.login(self._settings.username, self._settings.password)
                 client.send_message(message)
         except (OSError, smtplib.SMTPException) as error:
@@ -140,4 +143,6 @@ def render_article_html(article: ArticleSummary) -> str:
 
 
 def format_seconds(duration_seconds: float) -> str:
-    return f"{duration_seconds:.1f} seconds"
+    minutes, seconds = divmod(duration_seconds, 60)
+    minute_label = "minute" if int(minutes) == 1 else "minutes"
+    return f"{int(minutes)} {minute_label} {seconds:.1f} seconds"

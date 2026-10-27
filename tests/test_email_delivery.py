@@ -24,15 +24,18 @@ class SmtpBriefingSenderTests(unittest.TestCase):
         message = smtp_client.send_message.call_args.args[0]
         self.assertEqual(message["To"], "reader@example.com")
         self.assertIn("Article Briefing", message["Subject"])
-        self.assertIn("12.5 seconds", message.get_body("plain").get_content())
+        self.assertIn(
+            "Briefing generation time: 0 minutes 12.5 seconds",
+            message.get_body("plain").get_content(),
+        )
         self.assertIn("<html>", message.get_body("html").get_content())
 
     def test_plain_text_includes_per_article_and_overall_timings(self) -> None:
         body = render_plain_text(make_briefing())
 
-        self.assertIn("Briefing generation time: 12.5 seconds", body)
-        self.assertIn("Overview summarization time: 1.5 seconds", body)
-        self.assertIn("Summarization time: 3.2 seconds", body)
+        self.assertIn("Briefing generation time: 0 minutes 12.5 seconds", body)
+        self.assertIn("Overview summarization time: 0 minutes 1.5 seconds", body)
+        self.assertIn("Summarization time: 0 minutes 3.2 seconds", body)
 
 
 def make_smtp_settings() -> SmtpSettings:
