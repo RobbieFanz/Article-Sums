@@ -73,6 +73,11 @@ landing files, or less than 500 extracted characters are skipped and reported
 in the terminal. The collector does not bypass login pages, paywalls, CAPTCHAs,
 or bot protections.
 
+Malformed story URLs, unsupported character encodings, invalid UTF-8 page text,
+article-extraction failures, and landing-file write failures are isolated to
+that story. The collector reports the failure and continues with the remaining
+Hacker News stories.
+
 ## Landing-file format
 
 Place one or more UTF-8 `.txt` files in `data/landing/`. An original article

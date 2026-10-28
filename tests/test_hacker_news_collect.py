@@ -100,11 +100,72 @@ class HackerNewsArticleCollectorTests(unittest.TestCase):
             self.assertEqual(results[0].status, CollectionStatus.SKIPPED)
             self.assertEqual(existing_file.read_text(encoding="utf-8"), "Existing article")
 
+    def test_invalid_unicode_in_one_article_does_not_stop_next_article(self) -> None:
+        invalid_story = make_story(
+            id=1,
+            title="Invalid Unicode",
+            url="https://example.com/invalid",
+        )
+        valid_story = make_story(
+            id=2,
+            title="Valid Article",
+            url="https://example.com/valid",
+        )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            landing_dir = Path(temporary_directory) / "landing"
+            collector = HackerNewsArticleCollector(
+                client=FakeHackerNewsClient([invalid_story, valid_story]),
+                landing_dir=landing_dir,
+                timeout_seconds=5,
+                minimum_text_characters=20,
+                page_downloader=download_page_with_invalid_unicode_for_first_story,
+                article_extractor=lambda html, url: "Readable article text." * 2,
+            )
 
-def make_story(url: str | None = "https://example.com/article") -> HackerNewsStory:
+            results = collector.collect_top_stories(limit=2)
+
+            self.assertEqual(
+                [result.status for result in results],
+                [CollectionStatus.FAILED, CollectionStatus.CREATED],
+            )
+            self.assertIn("not valid UTF-8", results[0].detail)
+            self.assertTrue((landing_dir / "hn-2-valid-article.txt").exists())
+
+    def test_non_utf8_text_cannot_be_written_and_is_skipped(self) -> None:
+        story = make_story()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            collector = HackerNewsArticleCollector(
+                client=FakeHackerNewsClient([story]),
+                landing_dir=Path(temporary_directory) / "landing",
+                timeout_seconds=5,
+                minimum_text_characters=1,
+                page_downloader=lambda url, timeout: DownloadedPage(url=url, html="<html>text</html>"),
+                article_extractor=lambda html, url: "\ud800",
+            )
+
+            results = collector.collect_top_stories(limit=1)
+
+            self.assertEqual(results[0].status, CollectionStatus.FAILED)
+            self.assertIn("Could not write landing file", results[0].detail)
+            self.assertEqual(list((Path(temporary_directory) / "landing").iterdir()), [])
+
+
+def download_page_with_invalid_unicode_for_first_story(
+    url: str, timeout: float
+) -> DownloadedPage:
+    if url.endswith("/invalid"):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+    return DownloadedPage(url=url, html="<html>article</html>")
+
+
+def make_story(
+    url: str | None = "https://example.com/article",
+    id: int = 42,
+    title: str = "Example Story",
+) -> HackerNewsStory:
     return HackerNewsStory(
-        id=42,
-        title="Example Story",
+        id=id,
+        title=title,
         score=100,
         descendants=25,
         by="example",

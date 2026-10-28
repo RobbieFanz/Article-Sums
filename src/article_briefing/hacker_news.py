@@ -50,7 +50,10 @@ class HackerNewsClient:
 
         stories: list[HackerNewsStory] = []
         for story_id in story_ids:
-            story = self._get_json(f"/item/{story_id}.json")
+            try:
+                story = self._get_json(f"/item/{story_id}.json")
+            except HackerNewsError:
+                continue
             parsed_story = parse_story(story)
             if parsed_story is None:
                 continue
@@ -80,6 +83,10 @@ class HackerNewsClient:
         except URLError as error:
             raise HackerNewsError(
                 f"Could not reach the Hacker News API: {error.reason}"
+            ) from error
+        except UnicodeDecodeError as error:
+            raise HackerNewsError(
+                "Hacker News returned data that was not valid UTF-8."
             ) from error
 
         try:

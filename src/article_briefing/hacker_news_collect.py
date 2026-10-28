@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 
 import certifi
 import trafilatura
+from lxml.etree import LxmlError
 
 from article_briefing.hacker_news import (
     DEFAULT_STORY_LIMIT,
@@ -75,10 +76,19 @@ class HackerNewsArticleCollector:
 
     def collect_top_stories(self, limit: int) -> list[CollectionResult]:
         self._landing_dir.mkdir(parents=True, exist_ok=True)
-        return [
-            self.collect_story(story)
-            for story in self._client.top_stories(limit)
-        ]
+        results: list[CollectionResult] = []
+        for story in self._client.top_stories(limit):
+            try:
+                results.append(self.collect_story(story))
+            except (OSError, UnicodeError, ValueError) as error:
+                results.append(
+                    CollectionResult(
+                        story,
+                        CollectionStatus.FAILED,
+                        f"Could not process story: {error}",
+                    )
+                )
+        return results
 
     def collect_story(self, story: HackerNewsStory) -> CollectionResult:
         if story.url is None:
@@ -94,7 +104,14 @@ class HackerNewsArticleCollector:
                 "The linked URL is not a public HTTP(S) URL.",
             )
 
-        destination = self._landing_dir / landing_filename(story)
+        try:
+            destination = self._landing_dir / landing_filename(story)
+        except (UnicodeError, ValueError) as error:
+            return CollectionResult(
+                story,
+                CollectionStatus.FAILED,
+                f"Could not parse story title: {error}",
+            )
         if destination.exists():
             return CollectionResult(
                 story,
@@ -112,6 +129,14 @@ class HackerNewsArticleCollector:
             text = self._article_extractor(page.html, page.url)
         except ArticleCollectionError as error:
             return CollectionResult(story, CollectionStatus.FAILED, str(error))
+        except UnicodeError as error:
+            return CollectionResult(
+                story,
+                CollectionStatus.FAILED,
+                f"Page text was not valid UTF-8: {error}",
+            )
+        except (OSError, ValueError) as error:
+            return CollectionResult(story, CollectionStatus.FAILED, str(error))
 
         if text is None or len(text.strip()) < self._minimum_text_characters:
             return CollectionResult(
@@ -122,7 +147,7 @@ class HackerNewsArticleCollector:
 
         try:
             write_landing_file(destination, page.url, text.strip())
-        except OSError as error:
+        except (OSError, UnicodeError) as error:
             return CollectionResult(
                 story,
                 CollectionStatus.FAILED,
@@ -162,14 +187,21 @@ def download_page(url: str, timeout_seconds: float) -> DownloadedPage:
                     f"Page exceeded the {MAX_PAGE_BYTES // (1024 * 1024)} MB download limit."
                 )
             charset = response.headers.get_content_charset() or "utf-8"
+        html = body.decode(charset)
     except HTTPError as error:
         raise ArticleCollectionError(f"Page returned HTTP {error.code}.") from error
     except URLError as error:
         raise ArticleCollectionError(f"Could not download page: {error.reason}") from error
+    except TimeoutError as error:
+        raise ArticleCollectionError("Page download timed out.") from error
     except UnicodeDecodeError as error:
         raise ArticleCollectionError("Page text could not be decoded.") from error
+    except LookupError as error:
+        raise ArticleCollectionError(
+            f"Page declared an unsupported character encoding: {error}."
+        ) from error
 
-    return DownloadedPage(url=final_url, html=body.decode(charset))
+    return DownloadedPage(url=final_url, html=html)
 
 
 def extract_article_text(html: str, url: str) -> str | None:
@@ -181,12 +213,15 @@ def extract_article_text(html: str, url: str) -> str | None:
             include_comments=False,
             include_tables=True,
         )
-    except Exception as error:
+    except (LxmlError, TypeError, UnicodeError, ValueError) as error:
         raise ArticleCollectionError("Could not extract readable article text.") from error
 
 
 def is_public_http_url(value: str) -> bool:
-    parsed_url = urlparse(value)
+    try:
+        parsed_url = urlparse(value)
+    except ValueError:
+        return False
     if parsed_url.scheme not in {"http", "https"} or not parsed_url.hostname:
         return False
     hostname = parsed_url.hostname.lower()
@@ -206,8 +241,13 @@ def landing_filename(story: HackerNewsStory) -> str:
 def write_landing_file(path: Path, url: str, text: str) -> None:
     content = f"URL: {url}\n\n{text}\n"
     temporary_path = path.with_suffix(f"{path.suffix}.tmp")
-    temporary_path.write_text(content, encoding="utf-8")
-    temporary_path.replace(path)
+    try:
+        temporary_path.write_text(content, encoding="utf-8")
+        temporary_path.replace(path)
+    except (OSError, UnicodeError):
+        if temporary_path.exists():
+            temporary_path.unlink()
+        raise
 
 
 def render_results(results: list[CollectionResult]) -> str:
