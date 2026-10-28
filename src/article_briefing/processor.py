@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 from article_briefing.config import Settings
 from article_briefing.models import (
     Article,
+    ArticleNotSelected,
     ArticleSummary,
     Briefing,
     BriefingOverview,
@@ -62,22 +63,28 @@ def process_landing_folder(
     articles: list[Article] = []
     processed_files: list[Path] = []
     warnings: list[str] = []
+    articles_not_selected: list[ArticleNotSelected] = []
     for path in landing_files:
         try:
             article = load_article(path, settings.max_article_characters)
         except ProcessingError as error:
             warnings.append(str(error))
+            articles_not_selected.append(
+                ArticleNotSelected(
+                    source_file=path.name,
+                    title=path.stem.replace("_", " ").replace("-", " ").strip(),
+                    url=None,
+                    reason=str(error),
+                )
+            )
             continue
         articles.append(article)
         processed_files.append(path)
 
-    if not articles:
-        return ProcessingResult(briefing_path=None, warnings=tuple(warnings))
-
     summaries: list[ArticleSummary] = []
     relevance_failures: list[RelevanceFailure] = []
     archived_files: list[Path] = []
-    not_included_article_count = 0
+    not_included_article_count = len(articles_not_selected)
     for article, source_file in zip(articles, processed_files, strict=True):
         relevance_decision, invalid_outputs = assess_relevance_with_retry(
             summarizer, article
@@ -86,8 +93,18 @@ def process_landing_folder(
             try:
                 summary = summarize_article_with_retry(summarizer, article)
             except OllamaError as error:
-                warnings.append(
-                    f"{source_file.name} could not be summarized after 2 attempts: {error}"
+                warning = f"{source_file.name} could not be summarized after 2 attempts: {error}"
+                warnings.append(warning)
+                articles_not_selected.append(
+                    ArticleNotSelected(
+                        source_file=article.source_file,
+                        title=article.title,
+                        url=article.url,
+                        reason=(
+                            "Relevance check returned invalid output after 3 attempts. "
+                            f"{warning}"
+                        ),
+                    )
                 )
                 not_included_article_count += 1
                 continue
@@ -99,6 +116,14 @@ def process_landing_folder(
             continue
 
         if not relevance_decision.include:
+            articles_not_selected.append(
+                ArticleNotSelected(
+                    source_file=article.source_file,
+                    title=article.title,
+                    url=article.url,
+                    reason=relevance_decision.reason,
+                )
+            )
             archived_files.append(source_file)
             not_included_article_count += 1
             continue
@@ -106,8 +131,15 @@ def process_landing_folder(
         try:
             summaries.append(summarize_article_with_retry(summarizer, article))
         except OllamaError as error:
-            warnings.append(
-                f"{source_file.name} could not be summarized after 2 attempts: {error}"
+            warning = f"{source_file.name} could not be summarized after 2 attempts: {error}"
+            warnings.append(warning)
+            articles_not_selected.append(
+                ArticleNotSelected(
+                    source_file=article.source_file,
+                    title=article.title,
+                    url=article.url,
+                    reason=warning,
+                )
             )
             not_included_article_count += 1
             continue
@@ -117,7 +149,7 @@ def process_landing_folder(
         summarize_briefing_with_retry(summarizer, summaries)
         if summaries
         else BriefingOverview(
-            overview="No articles met the relevance criteria for this briefing.",
+            overview="No article summaries are available for the combined briefing.",
             major_themes=[],
             watch_for="Review a later collection cycle for new relevant stories.",
         )
@@ -140,13 +172,15 @@ def process_landing_folder(
         skipped_files=warnings,
         generation_duration_seconds=generation_duration_seconds,
         relevance_failures=relevance_failures,
+        articles_not_selected=articles_not_selected,
         included_article_count=len(summaries),
         not_included_article_count=not_included_article_count,
     )
     create_briefing_directory(briefing_path)
     write_briefing(briefing_path, briefing)
     email_delivery_duration_seconds = sender.send(briefing) if sender else None
-    archive_files(archived_files, archive_path)
+    if archived_files:
+        archive_files(archived_files, archive_path)
     completed_briefing = Briefing(
         created_at=briefing.created_at,
         model=briefing.model,
@@ -155,6 +189,7 @@ def process_landing_folder(
         skipped_files=briefing.skipped_files,
         generation_duration_seconds=briefing.generation_duration_seconds,
         relevance_failures=briefing.relevance_failures,
+        articles_not_selected=briefing.articles_not_selected,
         included_article_count=briefing.included_article_count,
         not_included_article_count=briefing.not_included_article_count,
         total_duration_seconds=perf_counter() - started_at,
@@ -327,6 +362,7 @@ def render_markdown(payload: dict[str, object]) -> str:
         f"Model: `{payload['model']}`",
         f"Articles included: {payload['included_article_count']}",
         f"Articles not included: {payload['not_included_article_count']}",
+        "These counts refer to the main briefing; excluded articles are listed below.",
         f"Briefing generation time: {format_seconds(payload['generation_duration_seconds'])}",
         (
             f"Total process time: {format_seconds(payload['total_duration_seconds'])}"
@@ -372,6 +408,20 @@ def render_markdown(payload: dict[str, object]) -> str:
             "Individual article summaries are in [`article-summaries/`](article-summaries/).",
         ]
     )
+    articles_not_selected = payload["articles_not_selected"]
+    assert isinstance(articles_not_selected, list)
+    if articles_not_selected:
+        lines.extend(["", "## Articles not selected", ""])
+        for article in articles_not_selected:
+            assert isinstance(article, dict)
+            title = article["title"]
+            url = article["url"]
+            lines.extend(
+                [
+                    f"- [{title}]({url})" if url else f"- {title} (original link unavailable)",
+                    f"  - Reason: {article['reason']}",
+                ]
+            )
     skipped_files = payload["skipped_files"]
     assert isinstance(skipped_files, list)
     if skipped_files:

@@ -48,6 +48,14 @@ class RelevanceFailure:
 
 
 @dataclass(frozen=True)
+class ArticleNotSelected:
+    source_file: str
+    title: str
+    url: str | None
+    reason: str
+
+
+@dataclass(frozen=True)
 class BriefingOverview:
     overview: str
     major_themes: list[str]
@@ -68,6 +76,7 @@ class Briefing:
     skipped_files: list[str]
     generation_duration_seconds: float
     relevance_failures: list[RelevanceFailure] = field(default_factory=list)
+    articles_not_selected: list[ArticleNotSelected] = field(default_factory=list)
     included_article_count: int = 0
     not_included_article_count: int = 0
     total_duration_seconds: float | None = None

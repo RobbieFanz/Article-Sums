@@ -149,20 +149,25 @@ to control what is worthy of the email.
 
 The relevance response must be JSON with an `include` boolean and a non-empty
 `reason`. A valid `include: false` archives the source article without
-summarizing or emailing it. Invalid relevance output is retried up to three
+summarizing it. The email and saved briefing list its title, original link (if
+available), and the model's reason under “Articles not selected.” Summary
+failures and malformed landing files also appear there with the available
+details and failure reason. Invalid relevance output is retried up to three
 times. If all three attempts are invalid, the article is summarized and placed
 in a clearly marked section at the bottom of the email and saved briefing,
 outside the combined briefing overview. That section includes all three invalid
 model outputs for review.
 
 The top of every email and saved briefing reports the number of articles
-included and not included.
+included in the main briefing and not included, including malformed files and
+relevance-triage failures. The email can still list those not included.
 
 Malformed landing files do not stop valid files from being processed. The
 command prints a warning, includes the warning in `briefing.json`, and leaves
-each malformed file in `data/landing/` for correction. Only successfully
-summarized files are archived. Errors from Ollama or briefing-output creation
-still stop the batch without archiving its valid landing files.
+each malformed file in `data/landing/` for correction. Successfully summarized
+and relevance-rejected files are archived after successful delivery (or after
+saving if email is disabled). Errors from Ollama or briefing-output creation
+can still stop the batch before archiving.
 
 ## Configuration
 

@@ -7,10 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from article_briefing.config import Settings
-from article_briefing.email_delivery import EmailDeliveryError
+from article_briefing.email_delivery import EmailDeliveryError, render_html, render_plain_text
 from article_briefing.models import (
     Article,
     ArticleSummary,
+    Briefing,
     BriefingOverview,
     RelevanceDecision,
 )
@@ -117,6 +118,58 @@ class RelevanceRetrySummarizer(FakeSummarizer):
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_mixed_articles_keep_rejected_out_of_overview_but_in_email(self) -> None:
+        class MixedSummarizer(FakeSummarizer):
+            overview_titles: list[str]
+
+            def __init__(self) -> None:
+                self.summarized_files: list[str] = []
+
+            def assess_relevance(self, article: Article) -> RelevanceDecision:
+                return RelevanceDecision(
+                    include=article.source_file == "accepted.txt",
+                    reason="This story is not about the requested topics.",
+                    duration_seconds=0,
+                )
+
+            def summarize_article(self, article: Article) -> ArticleSummary:
+                self.summarized_files.append(article.source_file)
+                return super().summarize_article(article)
+
+            def summarize_briefing(self, summaries: list[ArticleSummary]) -> BriefingOverview:
+                self.overview_titles = [summary.title for summary in summaries]
+                return super().summarize_briefing(summaries)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root)
+            settings.landing_dir.mkdir(parents=True)
+            accepted = settings.landing_dir / "accepted.txt"
+            accepted.write_text("https://example.com/accepted\n\nAI news.", encoding="utf-8")
+            rejected = settings.landing_dir / "rejected.txt"
+            rejected.write_text("https://example.com/rejected\n\nTravel news.", encoding="utf-8")
+            summarizer = MixedSummarizer()
+            sender = FakeSender(accepted)
+
+            result = process_landing_folder(settings, summarizer, sender=sender)
+
+            self.assertEqual(result.included_article_count, 1)
+            self.assertEqual(result.not_included_article_count, 1)
+            self.assertEqual(summarizer.overview_titles, ["accepted"])
+            self.assertEqual(summarizer.summarized_files, ["accepted.txt"])
+            self.assertFalse(accepted.exists())
+            self.assertFalse(rejected.exists())
+            self.assertEqual(
+                {path.name for path in settings.archive_dir.glob("*/*.txt")},
+                {"accepted.txt", "rejected.txt"},
+            )
+            self.assertIsInstance(sender.briefing, Briefing)
+            assert isinstance(sender.briefing, Briefing)
+            for body in (render_plain_text(sender.briefing), render_html(sender.briefing)):
+                self.assertIn("https://example.com/accepted", body)
+                self.assertIn("https://example.com/rejected", body)
+                self.assertIn("This story is not about the requested topics.", body)
+
     def test_processes_and_archives_a_valid_landing_file(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -211,6 +264,9 @@ class ProcessorTests(unittest.TestCase):
             )
             briefing = json.loads((result.briefing_path / "briefing.json").read_text())
             self.assertEqual(briefing["skipped_files"], list(result.warnings))
+            self.assertEqual(briefing["not_included_article_count"], 1)
+            self.assertEqual(briefing["articles_not_selected"][0]["source_file"], "invalid.txt")
+            self.assertIsNone(briefing["articles_not_selected"][0]["url"])
 
     def test_url_header_is_saved_as_the_original_article_url(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -317,6 +373,11 @@ class ProcessorTests(unittest.TestCase):
             briefing_markdown = (result.briefing_path / "briefing.md").read_text()
             self.assertIn("## Articles not included", briefing_markdown)
             self.assertIn("failed.txt could not be summarized", briefing_markdown)
+            briefing = json.loads((result.briefing_path / "briefing.json").read_text())
+            self.assertEqual(
+                briefing["articles_not_selected"][0]["url"],
+                "https://example.com/failed",
+            )
 
     def test_retries_briefing_overview_once_before_succeeding(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -376,8 +437,9 @@ class ProcessorTests(unittest.TestCase):
                 encoding="utf-8",
             )
             summarizer = RelevanceRetrySummarizer(0, include=False)
+            sender = FakeSender(source_file)
 
-            result = process_landing_folder(settings, summarizer)
+            result = process_landing_folder(settings, summarizer, sender=sender)
 
             assert result.briefing_path is not None
             self.assertEqual(summarizer.relevance_calls, 1)
@@ -387,6 +449,48 @@ class ProcessorTests(unittest.TestCase):
             self.assertEqual(briefing["included_article_count"], 0)
             self.assertEqual(briefing["not_included_article_count"], 1)
             self.assertEqual(briefing["articles"], [])
+            self.assertEqual(
+                briefing["articles_not_selected"],
+                [{
+                    "source_file": "rejected.txt",
+                    "title": "rejected",
+                    "url": "https://example.com/rejected",
+                    "reason": "Configured relevance decision.",
+                }],
+            )
+            self.assertIsInstance(sender.briefing, Briefing)
+            assert isinstance(sender.briefing, Briefing)
+            text = render_plain_text(sender.briefing)
+            html = render_html(sender.briefing)
+            for body in (text, html):
+                self.assertIn("https://example.com/rejected", body)
+                self.assertIn("Configured relevance decision.", body)
+                self.assertIn("rejected", body)
+            self.assertIn(
+                "Configured relevance decision.",
+                (result.briefing_path / "briefing.md").read_text(),
+            )
+
+    def test_all_invalid_files_produce_a_report_without_archiving(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root)
+            settings.landing_dir.mkdir(parents=True)
+            source_file = settings.landing_dir / "empty.txt"
+            source_file.write_text("", encoding="utf-8")
+            sender = FakeSender(source_file)
+
+            result = process_landing_folder(settings, FakeSummarizer(), sender=sender)
+
+            self.assertIsNotNone(result.briefing_path)
+            self.assertTrue(source_file.exists())
+            self.assertFalse(settings.archive_dir.exists())
+            self.assertEqual(result.not_included_article_count, 1)
+            self.assertIsInstance(sender.briefing, Briefing)
+            assert isinstance(sender.briefing, Briefing)
+            body = render_plain_text(sender.briefing)
+            self.assertIn("empty.txt is empty", body)
+            self.assertIn("Original article: unavailable", body)
 
     def test_invalid_relevance_output_three_times_adds_flagged_summary(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -55,6 +55,7 @@ def render_plain_text(briefing: Briefing) -> str:
         f"Model: {briefing.model}",
         f"Articles included: {briefing.included_article_count}",
         f"Articles not included: {briefing.not_included_article_count}",
+        "These counts refer to the main briefing; excluded articles are listed below.",
         f"Briefing generation time: {format_seconds(briefing.generation_duration_seconds)}",
         "",
         "OVERVIEW",
@@ -98,6 +99,17 @@ def render_plain_text(briefing: Briefing) -> str:
                 article.input_note,
             ]
         )
+    if briefing.articles_not_selected:
+        lines.extend(["", "ARTICLES NOT SELECTED"])
+        for article in briefing.articles_not_selected:
+            lines.extend(
+                [
+                    "",
+                    article.title,
+                    f"Original article: {article.url or 'unavailable'}",
+                    f"Reason: {article.reason}",
+                ]
+            )
     if briefing.relevance_failures:
         lines.extend(
             [
@@ -131,6 +143,23 @@ def render_html(briefing: Briefing) -> str:
         render_relevance_failure_html(failure)
         for failure in briefing.relevance_failures
     )
+    not_selected_sections = (
+        "<h2>Articles not selected</h2>"
+        + "".join(
+            "<section>"
+            f"<h3>{html.escape(article.title)}</h3>"
+            + (
+                f'<p><a href="{html.escape(article.url, quote=True)}">Original article</a></p>'
+                if article.url
+                else "<p>Original article unavailable</p>"
+            )
+            + f"<p><strong>Reason:</strong> {html.escape(article.reason)}</p>"
+            "</section>"
+            for article in briefing.articles_not_selected
+        )
+        if briefing.articles_not_selected
+        else ""
+    )
     overview_details = (
         "<h2>Briefing overview error</h2>"
         "<p>The combined briefing could not be created: "
@@ -160,6 +189,7 @@ def render_html(briefing: Briefing) -> str:
     <strong>Model:</strong> {html.escape(briefing.model)}<br>
     <strong>Articles included:</strong> {briefing.included_article_count}<br>
     <strong>Articles not included:</strong> {briefing.not_included_article_count}<br>
+    These counts refer to the main briefing; excluded articles are listed below.<br>
     <strong>Briefing generation time:</strong>
     {html.escape(format_seconds(briefing.generation_duration_seconds))}</p>
     <h2>Overview</h2>
@@ -167,6 +197,7 @@ def render_html(briefing: Briefing) -> str:
     {overview_details}
     <h2>Article summaries</h2>
     {article_sections}
+    {not_selected_sections}
     {relevance_failure_sections}
     {skipped_sections}
   </body>

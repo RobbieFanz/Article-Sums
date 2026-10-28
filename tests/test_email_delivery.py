@@ -7,6 +7,7 @@ from article_briefing.config import SmtpSettings
 from article_briefing.email_delivery import SmtpBriefingSender, render_plain_text
 from article_briefing.models import (
     ArticleSummary,
+    ArticleNotSelected,
     Briefing,
     BriefingOverview,
     RelevanceFailure,
@@ -105,6 +106,39 @@ class SmtpBriefingSenderTests(unittest.TestCase):
         self.assertIn("RELEVANCE TRIAGE FAILURES", body)
         self.assertIn("Invalid output one", body)
         self.assertIn("Invalid output two", body)
+
+    def test_not_selected_articles_render_links_reasons_and_escape_html(self) -> None:
+        from dataclasses import replace
+
+        from article_briefing.email_delivery import render_html
+
+        briefing = replace(
+            make_briefing(),
+            articles_not_selected=[
+                ArticleNotSelected(
+                    source_file="travel.txt",
+                    title="Travel <story>",
+                    url="https://example.com/story?a=1&b=2",
+                    reason="Not relevant & outside your topics.",
+                ),
+                ArticleNotSelected(
+                    source_file="missing.txt",
+                    title="No URL",
+                    url=None,
+                    reason="Missing article text.",
+                ),
+            ],
+        )
+        text = render_plain_text(briefing)
+        html = render_html(briefing)
+
+        self.assertIn("https://example.com/story?a=1&b=2", text)
+        self.assertIn("Reason: Not relevant & outside your topics.", text)
+        self.assertIn("Original article: unavailable", text)
+        self.assertIn('href="https://example.com/story?a=1&amp;b=2"', html)
+        self.assertIn("Travel &lt;story&gt;", html)
+        self.assertIn("Not relevant &amp; outside your topics.", html)
+        self.assertIn("Original article unavailable", html)
 
 
 def make_smtp_settings() -> SmtpSettings:
