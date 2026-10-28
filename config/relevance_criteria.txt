@@ -1,0 +1,5 @@
+Include substantive world news, AI research and development, significant software
+engineering news, significant technology, significant cybersecurity, and US/global
+finance. Reject food, travel, lifestyle, entertainment, generic personal stories,
+and low-information social posts unless they have a direct technical, business,
+finance, or world-news connection.

@@ -9,7 +9,7 @@ from time import perf_counter
 import certifi
 
 from article_briefing.config import SmtpSettings
-from article_briefing.models import ArticleSummary, Briefing
+from article_briefing.models import ArticleSummary, Briefing, RelevanceFailure
 
 
 class EmailDeliveryError(RuntimeError):
@@ -53,6 +53,8 @@ def render_plain_text(briefing: Briefing) -> str:
         "ARTICLE BRIEFING",
         f"Created: {briefing.created_at}",
         f"Model: {briefing.model}",
+        f"Articles included: {briefing.included_article_count}",
+        f"Articles not included: {briefing.not_included_article_count}",
         f"Briefing generation time: {format_seconds(briefing.generation_duration_seconds)}",
         "",
         "OVERVIEW",
@@ -96,6 +98,19 @@ def render_plain_text(briefing: Briefing) -> str:
                 article.input_note,
             ]
         )
+    if briefing.relevance_failures:
+        lines.extend(
+            [
+                "",
+                "RELEVANCE TRIAGE FAILURES",
+                (
+                    "These articles are excluded from the combined briefing because "
+                    "the model returned invalid relevance output after 3 attempts."
+                ),
+            ]
+        )
+        for failure in briefing.relevance_failures:
+            lines.extend(render_relevance_failure_plain_text(failure))
     if briefing.skipped_files:
         lines.extend(
             [
@@ -112,6 +127,10 @@ def render_html(briefing: Briefing) -> str:
         f"<li>{html.escape(theme)}</li>" for theme in briefing.overview.major_themes
     )
     article_sections = "".join(render_article_html(article) for article in briefing.articles)
+    relevance_failure_sections = "".join(
+        render_relevance_failure_html(failure)
+        for failure in briefing.relevance_failures
+    )
     overview_details = (
         "<h2>Briefing overview error</h2>"
         "<p>The combined briefing could not be created: "
@@ -139,6 +158,8 @@ def render_html(briefing: Briefing) -> str:
     <h1>Article Briefing</h1>
     <p><strong>Created:</strong> {html.escape(briefing.created_at)}<br>
     <strong>Model:</strong> {html.escape(briefing.model)}<br>
+    <strong>Articles included:</strong> {briefing.included_article_count}<br>
+    <strong>Articles not included:</strong> {briefing.not_included_article_count}<br>
     <strong>Briefing generation time:</strong>
     {html.escape(format_seconds(briefing.generation_duration_seconds))}</p>
     <h2>Overview</h2>
@@ -146,6 +167,7 @@ def render_html(briefing: Briefing) -> str:
     {overview_details}
     <h2>Article summaries</h2>
     {article_sections}
+    {relevance_failure_sections}
     {skipped_sections}
   </body>
 </html>
@@ -175,6 +197,49 @@ def render_article_html(article: ArticleSummary) -> str:
   <strong>Read recommendation:</strong>
   {html.escape(article.read_recommendation)}</p>
   <p><em>{html.escape(article.input_note)}</em></p>
+</section>
+"""
+
+
+def render_relevance_failure_plain_text(failure: RelevanceFailure) -> list[str]:
+    summary = failure.summary
+    lines = [
+        "",
+        f"WARNING: Relevance triage failed — {summary.title}",
+        f"Original article: {summary.url or 'unavailable'}",
+        f"Summarization time: {format_seconds(summary.summarization_duration_seconds)}",
+        summary.summary,
+        "Invalid relevance outputs:",
+    ]
+    lines.extend(
+        f"{index}. {output}"
+        for index, output in enumerate(failure.invalid_outputs, 1)
+    )
+    return lines
+
+
+def render_relevance_failure_html(failure: RelevanceFailure) -> str:
+    summary = failure.summary
+    source = (
+        f'<a href="{html.escape(summary.url, quote=True)}">Original article</a>'
+        if summary.url
+        else "Original article unavailable"
+    )
+    invalid_outputs = "".join(
+        f"<li><pre>{html.escape(output)}</pre></li>"
+        for output in failure.invalid_outputs
+    )
+    return f"""\
+<section style="margin-top: 24px; border-top: 2px solid #b91c1c; padding-top: 16px;">
+  <h2>Relevance triage warning: {html.escape(summary.title)}</h2>
+  <p>This article is excluded from the combined briefing because the model returned
+  invalid relevance output after 3 attempts.</p>
+  <p>{source}<br>
+  <strong>Summarization time:</strong>
+  {html.escape(format_seconds(summary.summarization_duration_seconds))}</p>
+  <p>{html.escape(summary.summary)}</p>
+  <strong>Invalid relevance outputs</strong>
+  <ol>{invalid_outputs}</ol>
 </section>
 """
 

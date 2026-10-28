@@ -8,12 +8,24 @@ from pathlib import Path
 
 from article_briefing.config import Settings
 from article_briefing.email_delivery import EmailDeliveryError
-from article_briefing.models import Article, ArticleSummary, BriefingOverview
-from article_briefing.ollama import OllamaError
+from article_briefing.models import (
+    Article,
+    ArticleSummary,
+    BriefingOverview,
+    RelevanceDecision,
+)
+from article_briefing.ollama import OllamaError, OllamaOutputError
 from article_briefing.processor import ProcessingError, process_landing_folder
 
 
 class FakeSummarizer:
+    def assess_relevance(self, article: Article) -> RelevanceDecision:
+        return RelevanceDecision(
+            include=True,
+            reason="Relevant to the configured briefing.",
+            duration_seconds=0.0,
+        )
+
     def summarize_article(self, article: Article) -> ArticleSummary:
         return ArticleSummary(
             title=article.title,
@@ -39,9 +51,11 @@ class FakeSender:
         self.source_file = source_file
         self.duration_seconds = duration_seconds
         self.was_source_file_present_when_sent = False
+        self.briefing: object | None = None
 
     def send(self, briefing: object) -> float:
         self.was_source_file_present_when_sent = self.source_file.exists()
+        self.briefing = briefing
         return self.duration_seconds
 
 
@@ -75,6 +89,31 @@ class OverviewRetrySummarizer(FakeSummarizer):
                 "Ollama response field 'overview' must be a non-empty string."
             )
         return super().summarize_briefing(summaries)
+
+
+class RelevanceRetrySummarizer(FakeSummarizer):
+    def __init__(self, invalid_response_count: int, include: bool = True) -> None:
+        self.invalid_response_count = invalid_response_count
+        self.include = include
+        self.relevance_calls = 0
+        self.summary_calls = 0
+
+    def assess_relevance(self, article: Article) -> RelevanceDecision:
+        self.relevance_calls += 1
+        if self.relevance_calls <= self.invalid_response_count:
+            raise OllamaOutputError(
+                "Ollama response field 'include' must be a boolean.",
+                f"Invalid relevance output {self.relevance_calls}",
+            )
+        return RelevanceDecision(
+            include=self.include,
+            reason="Configured relevance decision.",
+            duration_seconds=0.0,
+        )
+
+    def summarize_article(self, article: Article) -> ArticleSummary:
+        self.summary_calls += 1
+        return super().summarize_article(article)
 
 
 class ProcessorTests(unittest.TestCase):
@@ -115,6 +154,8 @@ class ProcessorTests(unittest.TestCase):
             self.assertGreater(briefing["generation_duration_seconds"], 0)
             self.assertGreater(briefing["total_duration_seconds"], 0)
             self.assertEqual(briefing["email_delivery_duration_seconds"], None)
+            self.assertEqual(briefing["included_article_count"], 1)
+            self.assertEqual(briefing["not_included_article_count"], 0)
             self.assertIn(
                 "**Summarization time:** 0.0 seconds",
                 (briefing_path / "article-summaries" / "model-release.md").read_text(),
@@ -323,6 +364,62 @@ class ProcessorTests(unittest.TestCase):
             self.assertTrue(
                 (result.briefing_path / "article-summaries" / "overview-failure.md").exists()
             )
+
+    def test_archives_validly_rejected_article_without_summarizing_it(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root)
+            settings.landing_dir.mkdir(parents=True)
+            source_file = settings.landing_dir / "rejected.txt"
+            source_file.write_text(
+                "https://example.com/rejected\n\nArticle text.",
+                encoding="utf-8",
+            )
+            summarizer = RelevanceRetrySummarizer(0, include=False)
+
+            result = process_landing_folder(settings, summarizer)
+
+            assert result.briefing_path is not None
+            self.assertEqual(summarizer.relevance_calls, 1)
+            self.assertEqual(summarizer.summary_calls, 0)
+            self.assertFalse(source_file.exists())
+            briefing = json.loads((result.briefing_path / "briefing.json").read_text())
+            self.assertEqual(briefing["included_article_count"], 0)
+            self.assertEqual(briefing["not_included_article_count"], 1)
+            self.assertEqual(briefing["articles"], [])
+
+    def test_invalid_relevance_output_three_times_adds_flagged_summary(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            settings = make_settings(root)
+            settings.landing_dir.mkdir(parents=True)
+            source_file = settings.landing_dir / "triage-failure.txt"
+            source_file.write_text(
+                "https://example.com/triage-failure\n\nArticle text.",
+                encoding="utf-8",
+            )
+            summarizer = RelevanceRetrySummarizer(3)
+            sender = FakeSender(source_file)
+
+            result = process_landing_folder(settings, summarizer, sender=sender)
+
+            assert result.briefing_path is not None
+            self.assertEqual(summarizer.relevance_calls, 3)
+            self.assertEqual(summarizer.summary_calls, 1)
+            self.assertFalse(source_file.exists())
+            briefing = json.loads((result.briefing_path / "briefing.json").read_text())
+            self.assertEqual(briefing["included_article_count"], 0)
+            self.assertEqual(briefing["not_included_article_count"], 1)
+            self.assertEqual(
+                briefing["relevance_failures"][0]["invalid_outputs"],
+                [
+                    "Invalid relevance output 1",
+                    "Invalid relevance output 2",
+                    "Invalid relevance output 3",
+                ],
+            )
+            assert sender.briefing is not None
+            self.assertEqual(getattr(sender.briefing, "relevance_failures")[0].summary.title, "triage failure")
 
 
 def make_settings(root: Path) -> Settings:

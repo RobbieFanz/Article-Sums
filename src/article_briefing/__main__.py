@@ -35,6 +35,11 @@ def main() -> None:
         )
         return
     print(f"Created briefing: {result.briefing_path}")
+    print(
+        "Articles included: "
+        f"{result.included_article_count} | "
+        f"not included: {result.not_included_article_count}"
+    )
     print(f"Briefing generation time: {result.generation_duration_seconds:.1f} seconds")
     print(f"Total process time: {result.total_duration_seconds:.1f} seconds")
     if result.email_delivery_duration_seconds is not None:

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,25 @@ class ArticleSummary:
 
 
 @dataclass(frozen=True)
+class RelevanceDecision:
+    include: bool
+    reason: str
+    duration_seconds: float
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
+class RelevanceFailure:
+    summary: ArticleSummary
+    invalid_outputs: list[str]
+
+    def as_dict(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class BriefingOverview:
     overview: str
     major_themes: list[str]
@@ -48,6 +67,9 @@ class Briefing:
     articles: list[ArticleSummary]
     skipped_files: list[str]
     generation_duration_seconds: float
+    relevance_failures: list[RelevanceFailure] = field(default_factory=list)
+    included_article_count: int = 0
+    not_included_article_count: int = 0
     total_duration_seconds: float | None = None
     email_delivery_duration_seconds: float | None = None
 

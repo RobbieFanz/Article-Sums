@@ -135,6 +135,24 @@ The combined briefing overview is also retried once. If both attempts fail, the
 email and saved briefing state the overview error and still include every valid
 individual article summary.
 
+## AI relevance filtering
+
+Before creating an article summary, Ollama evaluates each landing-file article
+against the editorial criteria in
+[`config/relevance_criteria.txt`](config/relevance_criteria.txt). Edit that file
+to control what is worthy of the email.
+
+The relevance response must be JSON with an `include` boolean and a non-empty
+`reason`. A valid `include: false` archives the source article without
+summarizing or emailing it. Invalid relevance output is retried up to three
+times. If all three attempts are invalid, the article is summarized and placed
+in a clearly marked section at the bottom of the email and saved briefing,
+outside the combined briefing overview. That section includes all three invalid
+model outputs for review.
+
+The top of every email and saved briefing reports the number of articles
+included and not included.
+
 Malformed landing files do not stop valid files from being processed. The
 command prints a warning, includes the warning in `briefing.json`, and leaves
 each malformed file in `data/landing/` for correction. Only successfully
@@ -152,6 +170,8 @@ still stop the batch without archiving its valid landing files.
 | `ARCHIVE_DIR` | No | Archived input directory, default `data/archive` |
 | `BRIEFING_DIR` | No | Generated briefing directory, default `data/briefings` |
 | `MAX_ARTICLE_CHARACTERS` | No | Per-article input cap, default `24000` |
+| `RELEVANCE_CRITERIA_FILE` | No | Criteria text file for AI relevance filtering |
+| `RELEVANCE_MAX_ARTICLE_CHARACTERS` | No | Article excerpt used for relevance triage, default `6000` |
 | `SMTP_ENABLED` | No | Set to `true` to email a successfully generated briefing |
 | `SMTP_HOST` | When enabled | SMTP hostname, for example your mail provider's SMTP server |
 | `SMTP_PORT` | When enabled | SMTP port, default `587` |

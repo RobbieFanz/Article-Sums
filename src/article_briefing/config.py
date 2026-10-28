@@ -9,6 +9,15 @@ class ConfigurationError(ValueError):
     """Raised when configuration is missing or invalid."""
 
 
+DEFAULT_RELEVANCE_CRITERIA = (
+    "Include substantive world news, AI research and development, significant "
+    "software engineering news, significant technology, significant cybersecurity, "
+    "and US/global finance. Reject food, travel, lifestyle, entertainment, generic "
+    "personal stories, and low-information social posts unless they have a direct "
+    "technical, business, finance, or world-news connection."
+)
+
+
 @dataclass(frozen=True)
 class SmtpSettings:
     enabled: bool
@@ -67,6 +76,8 @@ class Settings:
     archive_dir: Path
     briefing_dir: Path
     max_article_characters: int
+    relevance_criteria: str = DEFAULT_RELEVANCE_CRITERIA
+    relevance_max_article_characters: int = 6000
     smtp: SmtpSettings = field(default_factory=lambda: SmtpSettings(enabled=False))
 
     @classmethod
@@ -76,6 +87,15 @@ class Settings:
         model = required_environment("OLLAMA_MODEL")
         timeout = positive_float("OLLAMA_TIMEOUT_SECONDS", 180)
         maximum_characters = positive_integer("MAX_ARTICLE_CHARACTERS", 24000)
+        relevance_maximum_characters = positive_integer(
+            "RELEVANCE_MAX_ARTICLE_CHARACTERS", 6000
+        )
+        relevance_criteria = load_relevance_criteria(
+            resolve_project_path(
+                project_root,
+                os.getenv("RELEVANCE_CRITERIA_FILE", "config/relevance_criteria.txt"),
+            )
+        )
 
         return cls(
             project_root=project_root,
@@ -94,6 +114,8 @@ class Settings:
                 project_root, os.getenv("BRIEFING_DIR", "data/briefings")
             ),
             max_article_characters=maximum_characters,
+            relevance_criteria=relevance_criteria,
+            relevance_max_article_characters=relevance_maximum_characters,
             smtp=SmtpSettings.from_environment(),
         )
 
@@ -162,6 +184,18 @@ def boolean_environment(name: str, default: bool) -> bool:
     raise ConfigurationError(
         f"{name} must be one of: true, false, 1, 0, yes, no, on, or off."
     )
+
+
+def load_relevance_criteria(path: Path) -> str:
+    try:
+        criteria = path.read_text(encoding="utf-8").strip()
+    except OSError as error:
+        raise ConfigurationError(
+            f"Could not read relevance criteria file {path}: {error}"
+        ) from error
+    if not criteria:
+        raise ConfigurationError(f"Relevance criteria file {path} is empty.")
+    return criteria
 
 
 def resolve_project_path(project_root: Path, value: str) -> Path:

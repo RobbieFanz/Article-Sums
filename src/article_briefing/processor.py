@@ -9,8 +9,15 @@ from typing import Protocol
 from urllib.parse import urlparse
 
 from article_briefing.config import Settings
-from article_briefing.models import Article, ArticleSummary, Briefing, BriefingOverview
-from article_briefing.ollama import OllamaError
+from article_briefing.models import (
+    Article,
+    ArticleSummary,
+    Briefing,
+    BriefingOverview,
+    RelevanceDecision,
+    RelevanceFailure,
+)
+from article_briefing.ollama import OllamaError, OllamaOutputError
 
 
 class ProcessingError(RuntimeError):
@@ -24,9 +31,13 @@ class ProcessingResult:
     generation_duration_seconds: float | None = None
     total_duration_seconds: float | None = None
     email_delivery_duration_seconds: float | None = None
+    included_article_count: int = 0
+    not_included_article_count: int = 0
 
 
 class Summarizer(Protocol):
+    def assess_relevance(self, article: Article) -> RelevanceDecision: ...
+
     def summarize_article(self, article: Article) -> ArticleSummary: ...
 
     def summarize_briefing(self, summaries: list[ArticleSummary]) -> BriefingOverview: ...
@@ -64,21 +75,53 @@ def process_landing_folder(
         return ProcessingResult(briefing_path=None, warnings=tuple(warnings))
 
     summaries: list[ArticleSummary] = []
-    summarized_files: list[Path] = []
+    relevance_failures: list[RelevanceFailure] = []
+    archived_files: list[Path] = []
+    not_included_article_count = 0
     for article, source_file in zip(articles, processed_files, strict=True):
+        relevance_decision, invalid_outputs = assess_relevance_with_retry(
+            summarizer, article
+        )
+        if relevance_decision is None:
+            try:
+                summary = summarize_article_with_retry(summarizer, article)
+            except OllamaError as error:
+                warnings.append(
+                    f"{source_file.name} could not be summarized after 2 attempts: {error}"
+                )
+                not_included_article_count += 1
+                continue
+            relevance_failures.append(
+                RelevanceFailure(summary=summary, invalid_outputs=invalid_outputs)
+            )
+            archived_files.append(source_file)
+            not_included_article_count += 1
+            continue
+
+        if not relevance_decision.include:
+            archived_files.append(source_file)
+            not_included_article_count += 1
+            continue
+
         try:
             summaries.append(summarize_article_with_retry(summarizer, article))
         except OllamaError as error:
             warnings.append(
                 f"{source_file.name} could not be summarized after 2 attempts: {error}"
             )
+            not_included_article_count += 1
             continue
-        summarized_files.append(source_file)
+        archived_files.append(source_file)
 
-    if not summaries:
-        return ProcessingResult(briefing_path=None, warnings=tuple(warnings))
-
-    overview = summarize_briefing_with_retry(summarizer, summaries)
+    overview = (
+        summarize_briefing_with_retry(summarizer, summaries)
+        if summaries
+        else BriefingOverview(
+            overview="No articles met the relevance criteria for this briefing.",
+            major_themes=[],
+            watch_for="Review a later collection cycle for new relevant stories.",
+        )
+    )
 
     timestamp = (now or datetime.now().astimezone()).strftime("%Y-%m-%d_%H%M%S%z")
     briefing_path = settings.briefing_dir / timestamp
@@ -96,11 +139,14 @@ def process_landing_folder(
         articles=summaries,
         skipped_files=warnings,
         generation_duration_seconds=generation_duration_seconds,
+        relevance_failures=relevance_failures,
+        included_article_count=len(summaries),
+        not_included_article_count=not_included_article_count,
     )
     create_briefing_directory(briefing_path)
     write_briefing(briefing_path, briefing)
     email_delivery_duration_seconds = sender.send(briefing) if sender else None
-    archive_files(summarized_files, archive_path)
+    archive_files(archived_files, archive_path)
     completed_briefing = Briefing(
         created_at=briefing.created_at,
         model=briefing.model,
@@ -108,6 +154,9 @@ def process_landing_folder(
         articles=briefing.articles,
         skipped_files=briefing.skipped_files,
         generation_duration_seconds=briefing.generation_duration_seconds,
+        relevance_failures=briefing.relevance_failures,
+        included_article_count=briefing.included_article_count,
+        not_included_article_count=briefing.not_included_article_count,
         total_duration_seconds=perf_counter() - started_at,
         email_delivery_duration_seconds=email_delivery_duration_seconds,
     )
@@ -118,6 +167,8 @@ def process_landing_folder(
         generation_duration_seconds=completed_briefing.generation_duration_seconds,
         total_duration_seconds=completed_briefing.total_duration_seconds,
         email_delivery_duration_seconds=email_delivery_duration_seconds,
+        included_article_count=completed_briefing.included_article_count,
+        not_included_article_count=completed_briefing.not_included_article_count,
     )
 
 
@@ -157,6 +208,18 @@ def summarize_article_with_retry(summarizer: Summarizer, article: Article) -> Ar
             last_error = error
     assert last_error is not None
     raise last_error
+
+
+def assess_relevance_with_retry(
+    summarizer: Summarizer, article: Article
+) -> tuple[RelevanceDecision | None, list[str]]:
+    invalid_outputs: list[str] = []
+    for _ in range(3):
+        try:
+            return summarizer.assess_relevance(article), invalid_outputs
+        except OllamaOutputError as error:
+            invalid_outputs.append(error.raw_output)
+    return None, invalid_outputs
 
 
 def summarize_briefing_with_retry(
@@ -262,6 +325,8 @@ def render_markdown(payload: dict[str, object]) -> str:
         "",
         f"Created: {payload['created_at']}",
         f"Model: `{payload['model']}`",
+        f"Articles included: {payload['included_article_count']}",
+        f"Articles not included: {payload['not_included_article_count']}",
         f"Briefing generation time: {format_seconds(payload['generation_duration_seconds'])}",
         (
             f"Total process time: {format_seconds(payload['total_duration_seconds'])}"
@@ -318,6 +383,38 @@ def render_markdown(payload: dict[str, object]) -> str:
                 *[f"- {warning}" for warning in skipped_files],
             ]
         )
+    relevance_failures = payload["relevance_failures"]
+    assert isinstance(relevance_failures, list)
+    if relevance_failures:
+        lines.extend(
+            [
+                "",
+                "## Relevance triage failures",
+                "",
+                "These articles are excluded from the combined briefing because the "
+                "model did not return valid relevance output after 3 attempts.",
+            ]
+        )
+        for failure in relevance_failures:
+            assert isinstance(failure, dict)
+            summary = failure["summary"]
+            invalid_outputs = failure["invalid_outputs"]
+            assert isinstance(summary, dict)
+            assert isinstance(invalid_outputs, list)
+            lines.extend(
+                [
+                    "",
+                    f"### {summary['title']}",
+                    "",
+                    str(summary["summary"]),
+                    "",
+                    "**Invalid relevance outputs**",
+                    *[
+                        f"{index}. `{output}`"
+                        for index, output in enumerate(invalid_outputs, 1)
+                    ],
+                ]
+            )
     return "\n".join(lines) + "\n"
 
 

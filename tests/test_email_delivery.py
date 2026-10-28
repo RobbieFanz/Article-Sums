@@ -5,7 +5,12 @@ from unittest.mock import MagicMock, patch
 
 from article_briefing.config import SmtpSettings
 from article_briefing.email_delivery import SmtpBriefingSender, render_plain_text
-from article_briefing.models import ArticleSummary, Briefing, BriefingOverview
+from article_briefing.models import (
+    ArticleSummary,
+    Briefing,
+    BriefingOverview,
+    RelevanceFailure,
+)
 
 
 class SmtpBriefingSenderTests(unittest.TestCase):
@@ -74,6 +79,33 @@ class SmtpBriefingSenderTests(unittest.TestCase):
         self.assertIn("BRIEFING OVERVIEW ERROR", body)
         self.assertIn("Ollama response was invalid.", body)
 
+    def test_plain_text_includes_counts_and_all_invalid_relevance_outputs(self) -> None:
+        briefing = make_briefing()
+        briefing = Briefing(
+            created_at=briefing.created_at,
+            model=briefing.model,
+            overview=briefing.overview,
+            articles=briefing.articles,
+            skipped_files=[],
+            generation_duration_seconds=briefing.generation_duration_seconds,
+            relevance_failures=[
+                RelevanceFailure(
+                    summary=briefing.articles[0],
+                    invalid_outputs=["Invalid output one", "Invalid output two"],
+                )
+            ],
+            included_article_count=1,
+            not_included_article_count=1,
+        )
+
+        body = render_plain_text(briefing)
+
+        self.assertIn("Articles included: 1", body)
+        self.assertIn("Articles not included: 1", body)
+        self.assertIn("RELEVANCE TRIAGE FAILURES", body)
+        self.assertIn("Invalid output one", body)
+        self.assertIn("Invalid output two", body)
+
 
 def make_smtp_settings() -> SmtpSettings:
     return SmtpSettings(
@@ -114,6 +146,8 @@ def make_briefing() -> Briefing:
         articles=[article],
         skipped_files=[],
         generation_duration_seconds=12.5,
+        included_article_count=1,
+        not_included_article_count=0,
     )
 
 
