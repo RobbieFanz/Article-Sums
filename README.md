@@ -112,6 +112,12 @@ release” in the generated briefing.
 python -m article_briefing
 ```
 
+While it runs, the command prints each processing stage, attempt and error to
+the terminal, along with complete Ollama HTTP response bodies and model
+responses, including invalid responses. This can be very verbose and may
+expose article-derived or other sensitive information in terminal scrollback
+or redirected logs. Request contents and SMTP credentials are not logged.
+
 On success, the command:
 
 1. creates one structured Ollama summary per landing file;

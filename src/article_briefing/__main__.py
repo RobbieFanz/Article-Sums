@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 from time import perf_counter
@@ -16,14 +17,23 @@ from article_briefing.processor import (
 
 
 def main() -> None:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+        stream=sys.stderr,
+    )
+    logger = logging.getLogger(__name__)
+    logger.info("Starting article briefing; loading configuration.")
     project_root = Path.cwd()
     started_at = perf_counter()
     try:
         load_dotenv(project_root / ".env")
         smtp = SmtpSettings.from_environment()
+        logger.info("SMTP delivery is %s.", "enabled" if smtp.enabled else "disabled")
         sender = SmtpBriefingSender(smtp) if smtp.enabled else None
         try:
             settings = Settings.from_loaded_environment(project_root, smtp=smtp)
+            logger.info("Configured Ollama model: %s", settings.ollama_model)
             summarizer = OllamaClient(settings)
         except Exception as error:
             if sender is not None:

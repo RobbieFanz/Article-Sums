@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from time import perf_counter
 from typing import Any
 from urllib.error import HTTPError, URLError
@@ -13,6 +14,8 @@ from article_briefing.models import (
     BriefingOverview,
     RelevanceDecision,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class OllamaError(RuntimeError):
@@ -111,6 +114,12 @@ class OllamaClient:
     def assess_relevance(self, article: Article) -> RelevanceDecision:
         started_at = perf_counter()
         relevance_text = article.text[: self._settings.relevance_max_article_characters]
+        logger.info(
+            "Relevance input for %s: %d of %d loaded article characters.",
+            article.source_file,
+            len(relevance_text),
+            len(article.text),
+        )
         text_note = (
             "The complete supplied article text is included."
             if len(relevance_text) == len(article.text)
@@ -176,11 +185,25 @@ class OllamaClient:
             headers={"Content-Type": "application/json"},
             method="POST",
         )
+        logger.info(
+            "Sending Ollama request to model %s (system prompt %d characters; "
+            "user prompt %d characters).",
+            self._settings.ollama_model,
+            len(system_prompt),
+            len(user_prompt),
+        )
         try:
             with urlopen(request, timeout=self._settings.ollama_timeout_seconds) as response:
-                body = response.read().decode("utf-8")
+                response_bytes = response.read()
+                logger.info(
+                    "Ollama HTTP response body:\n%s",
+                    response_bytes.decode("utf-8", errors="replace"),
+                )
+                body = response_bytes.decode("utf-8")
         except HTTPError as error:
-            details = error.read().decode("utf-8", errors="replace")[:500]
+            response_body = error.read().decode("utf-8", errors="replace")
+            logger.info("Ollama HTTP %s error response body:\n%s", error.code, response_body)
+            details = response_body[:500]
             raise OllamaError(
                 f"Ollama returned HTTP {error.code}: {details}"
             ) from error
@@ -208,6 +231,7 @@ class OllamaClient:
                 "Ollama returned a response with non-text message content.",
                 body,
             )
+        logger.info("Ollama model response content:\n%s", content)
         try:
             parsed = json.loads(content)
         except json.JSONDecodeError as error:

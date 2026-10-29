@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sys
 from dataclasses import dataclass
 from datetime import datetime
@@ -21,6 +22,8 @@ from article_briefing.models import (
     RelevanceFailure,
 )
 from article_briefing.ollama import OllamaError, OllamaOutputError
+
+logger = logging.getLogger(__name__)
 
 
 class ProcessingError(RuntimeError):
@@ -68,7 +71,9 @@ def notify_failure(
         current_article=progress.current_article,
     )
     try:
+        logger.info("Sending failure notification email.")
         sender.send_failure(failure)
+        logger.info("Failure notification email sent.")
     except Exception as notification_error:
         print(
             f"Error: Could not send failure notification: {notification_error}",
@@ -87,6 +92,12 @@ def process_landing_folder(
     try:
         return _process_landing_folder(settings, summarizer, now, sender, started_at, progress)
     except Exception as error:
+        logger.info(
+            "Briefing failed after %d processed article(s); active article: %s; error: %s",
+            progress.processed_article_count,
+            progress.current_article or "none",
+            error,
+        )
         if sender is not None:
             notify_failure(sender, error, started_at, progress)
         raise
@@ -102,6 +113,7 @@ def _process_landing_folder(
 ) -> ProcessingResult:
     settings.landing_dir.mkdir(parents=True, exist_ok=True)
     landing_files = sorted(settings.landing_dir.glob("*.txt"))
+    logger.info("Found %d landing article(s) in %s.", len(landing_files), settings.landing_dir)
     if not landing_files:
         return ProcessingResult(briefing_path=None, warnings=())
 
@@ -110,10 +122,12 @@ def _process_landing_folder(
     warnings: list[str] = []
     articles_not_selected: list[ArticleNotSelected] = []
     for path in landing_files:
+        logger.info("Loading article: %s", path.name)
         progress.current_article = path.name
         try:
             article = load_article(path, settings.max_article_characters)
         except ProcessingError as error:
+            logger.info("Skipping invalid article %s: %s", path.name, error)
             warnings.append(str(error))
             articles_not_selected.append(
                 ArticleNotSelected(
@@ -127,6 +141,12 @@ def _process_landing_folder(
             progress.current_article = None
             continue
         articles.append(article)
+        logger.info(
+            "Loaded %s: %d characters%s.",
+            path.name,
+            len(article.text),
+            " (truncated)" if article.was_truncated else "",
+        )
         processed_files.append(path)
         progress.current_article = None
 
@@ -140,11 +160,16 @@ def _process_landing_folder(
             summarizer, article
         )
         if relevance_decision is None:
+            logger.info(
+                "Relevance check failed for %s; attempting a fallback summary.",
+                source_file.name,
+            )
             try:
                 summary = summarize_article_with_retry(summarizer, article)
             except OllamaError as error:
                 warning = f"{source_file.name} could not be summarized after 2 attempts: {error}"
                 warnings.append(warning)
+                logger.info("%s", warning)
                 articles_not_selected.append(
                     ArticleNotSelected(
                         source_file=article.source_file,
@@ -163,6 +188,7 @@ def _process_landing_folder(
             relevance_failures.append(
                 RelevanceFailure(summary=summary, invalid_outputs=invalid_outputs)
             )
+            logger.info("Saved fallback summary for %s outside the overview.", source_file.name)
             archived_files.append(source_file)
             not_included_article_count += 1
             progress.processed_article_count += 1
@@ -170,6 +196,7 @@ def _process_landing_folder(
             continue
 
         if not relevance_decision.include:
+            logger.info("Rejected %s: %s", source_file.name, relevance_decision.reason)
             articles_not_selected.append(
                 ArticleNotSelected(
                     source_file=article.source_file,
@@ -185,10 +212,12 @@ def _process_landing_folder(
             continue
 
         try:
+            logger.info("Selected %s: %s", source_file.name, relevance_decision.reason)
             summaries.append(summarize_article_with_retry(summarizer, article))
         except OllamaError as error:
             warning = f"{source_file.name} could not be summarized after 2 attempts: {error}"
             warnings.append(warning)
+            logger.info("%s", warning)
             articles_not_selected.append(
                 ArticleNotSelected(
                     source_file=article.source_file,
@@ -202,9 +231,11 @@ def _process_landing_folder(
             progress.current_article = None
             continue
         archived_files.append(source_file)
+        logger.info("Summary accepted for %s.", source_file.name)
         progress.processed_article_count += 1
         progress.current_article = None
 
+    logger.info("Preparing overview from %d selected article(s).", len(summaries))
     overview = (
         summarize_briefing_with_retry(summarizer, summaries)
         if summaries
@@ -237,9 +268,17 @@ def _process_landing_folder(
         not_included_article_count=not_included_article_count,
     )
     create_briefing_directory(briefing_path)
+    logger.info("Writing briefing output to %s.", briefing_path)
     write_briefing(briefing_path, briefing)
-    email_delivery_duration_seconds = sender.send(briefing) if sender else None
+    if sender:
+        logger.info("Sending briefing email.")
+        email_delivery_duration_seconds = sender.send(briefing)
+        logger.info("Briefing email sent in %.1f seconds.", email_delivery_duration_seconds)
+    else:
+        email_delivery_duration_seconds = None
+        logger.info("Skipping email delivery because SMTP is disabled.")
     if archived_files:
+        logger.info("Archiving %d article(s) to %s.", len(archived_files), archive_path)
         archive_files(archived_files, archive_path, progress)
     completed_briefing = Briefing(
         created_at=briefing.created_at,
@@ -255,7 +294,9 @@ def _process_landing_folder(
         total_duration_seconds=perf_counter() - started_at,
         email_delivery_duration_seconds=email_delivery_duration_seconds,
     )
+    logger.info("Updating briefing output with completion timings.")
     write_briefing(briefing_path, completed_briefing)
+    logger.info("Briefing processing completed.")
     return ProcessingResult(
         briefing_path=briefing_path,
         warnings=tuple(warnings),
@@ -296,10 +337,14 @@ def load_article(path: Path, maximum_characters: int) -> Article:
 
 def summarize_article_with_retry(summarizer: Summarizer, article: Article) -> ArticleSummary:
     last_error: OllamaError | None = None
-    for _ in range(2):
+    for attempt in range(1, 3):
+        logger.info("Summarizing %s (attempt %d/2).", article.source_file, attempt)
         try:
-            return summarizer.summarize_article(article)
+            summary = summarizer.summarize_article(article)
+            logger.info("Summary succeeded for %s (attempt %d/2).", article.source_file, attempt)
+            return summary
         except OllamaError as error:
+            logger.info("Summary attempt %d/2 failed for %s: %s", attempt, article.source_file, error)
             last_error = error
     assert last_error is not None
     raise last_error
@@ -309,10 +354,14 @@ def assess_relevance_with_retry(
     summarizer: Summarizer, article: Article
 ) -> tuple[RelevanceDecision | None, list[str]]:
     invalid_outputs: list[str] = []
-    for _ in range(3):
+    for attempt in range(1, 4):
+        logger.info("Checking relevance of %s (attempt %d/3).", article.source_file, attempt)
         try:
-            return summarizer.assess_relevance(article), invalid_outputs
+            decision = summarizer.assess_relevance(article)
+            logger.info("Relevance check succeeded for %s (attempt %d/3).", article.source_file, attempt)
+            return decision, invalid_outputs
         except OllamaOutputError as error:
+            logger.info("Relevance attempt %d/3 failed for %s: %s", attempt, article.source_file, error)
             invalid_outputs.append(error.raw_output)
     return None, invalid_outputs
 
@@ -321,10 +370,14 @@ def summarize_briefing_with_retry(
     summarizer: Summarizer, summaries: list[ArticleSummary]
 ) -> BriefingOverview:
     last_error: OllamaError | None = None
-    for _ in range(2):
+    for attempt in range(1, 3):
+        logger.info("Generating briefing overview (attempt %d/2).", attempt)
         try:
-            return summarizer.summarize_briefing(summaries)
+            overview = summarizer.summarize_briefing(summaries)
+            logger.info("Briefing overview succeeded (attempt %d/2).", attempt)
+            return overview
         except OllamaError as error:
+            logger.info("Briefing overview attempt %d/2 failed: %s", attempt, error)
             last_error = error
     assert last_error is not None
     return BriefingOverview(
@@ -383,6 +436,7 @@ def archive_files(
         archive_path.mkdir()
         for source_path in landing_files:
             progress.current_article = source_path.name
+            logger.info("Archiving article: %s", source_path.name)
             destination_path = archive_path / source_path.name
             source_path.replace(destination_path)
             moved_files.append((source_path, destination_path))
