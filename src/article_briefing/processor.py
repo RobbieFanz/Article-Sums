@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +16,7 @@ from article_briefing.models import (
     ArticleSummary,
     Briefing,
     BriefingOverview,
+    FailureReport,
     RelevanceDecision,
     RelevanceFailure,
 )
@@ -47,6 +49,32 @@ class Summarizer(Protocol):
 class BriefingSender(Protocol):
     def send(self, briefing: Briefing) -> float: ...
 
+    def send_failure(self, failure: FailureReport) -> float: ...
+
+
+@dataclass
+class ProcessingProgress:
+    processed_article_count: int = 0
+    current_article: str | None = None
+
+
+def notify_failure(
+    sender: BriefingSender, error: Exception, started_at: float, progress: ProcessingProgress
+) -> None:
+    failure = FailureReport(
+        error=f"{type(error).__name__}: {error}",
+        duration_seconds=perf_counter() - started_at,
+        processed_article_count=progress.processed_article_count,
+        current_article=progress.current_article,
+    )
+    try:
+        sender.send_failure(failure)
+    except Exception as notification_error:
+        print(
+            f"Error: Could not send failure notification: {notification_error}",
+            file=sys.stderr,
+        )
+
 
 def process_landing_folder(
     settings: Settings,
@@ -55,6 +83,23 @@ def process_landing_folder(
     sender: BriefingSender | None = None,
 ) -> ProcessingResult:
     started_at = perf_counter()
+    progress = ProcessingProgress()
+    try:
+        return _process_landing_folder(settings, summarizer, now, sender, started_at, progress)
+    except Exception as error:
+        if sender is not None:
+            notify_failure(sender, error, started_at, progress)
+        raise
+
+
+def _process_landing_folder(
+    settings: Settings,
+    summarizer: Summarizer,
+    now: datetime | None,
+    sender: BriefingSender | None,
+    started_at: float,
+    progress: ProcessingProgress,
+) -> ProcessingResult:
     settings.landing_dir.mkdir(parents=True, exist_ok=True)
     landing_files = sorted(settings.landing_dir.glob("*.txt"))
     if not landing_files:
@@ -65,6 +110,7 @@ def process_landing_folder(
     warnings: list[str] = []
     articles_not_selected: list[ArticleNotSelected] = []
     for path in landing_files:
+        progress.current_article = path.name
         try:
             article = load_article(path, settings.max_article_characters)
         except ProcessingError as error:
@@ -77,15 +123,19 @@ def process_landing_folder(
                     reason=str(error),
                 )
             )
+            progress.processed_article_count += 1
+            progress.current_article = None
             continue
         articles.append(article)
         processed_files.append(path)
+        progress.current_article = None
 
     summaries: list[ArticleSummary] = []
     relevance_failures: list[RelevanceFailure] = []
     archived_files: list[Path] = []
     not_included_article_count = len(articles_not_selected)
     for article, source_file in zip(articles, processed_files, strict=True):
+        progress.current_article = source_file.name
         relevance_decision, invalid_outputs = assess_relevance_with_retry(
             summarizer, article
         )
@@ -107,12 +157,16 @@ def process_landing_folder(
                     )
                 )
                 not_included_article_count += 1
+                progress.processed_article_count += 1
+                progress.current_article = None
                 continue
             relevance_failures.append(
                 RelevanceFailure(summary=summary, invalid_outputs=invalid_outputs)
             )
             archived_files.append(source_file)
             not_included_article_count += 1
+            progress.processed_article_count += 1
+            progress.current_article = None
             continue
 
         if not relevance_decision.include:
@@ -126,6 +180,8 @@ def process_landing_folder(
             )
             archived_files.append(source_file)
             not_included_article_count += 1
+            progress.processed_article_count += 1
+            progress.current_article = None
             continue
 
         try:
@@ -142,8 +198,12 @@ def process_landing_folder(
                 )
             )
             not_included_article_count += 1
+            progress.processed_article_count += 1
+            progress.current_article = None
             continue
         archived_files.append(source_file)
+        progress.processed_article_count += 1
+        progress.current_article = None
 
     overview = (
         summarize_briefing_with_retry(summarizer, summaries)
@@ -180,7 +240,7 @@ def process_landing_folder(
     write_briefing(briefing_path, briefing)
     email_delivery_duration_seconds = sender.send(briefing) if sender else None
     if archived_files:
-        archive_files(archived_files, archive_path)
+        archive_files(archived_files, archive_path, progress)
     completed_briefing = Briefing(
         created_at=briefing.created_at,
         model=briefing.model,
@@ -314,15 +374,19 @@ def write_briefing(briefing_path: Path, briefing: Briefing) -> None:
         raise ProcessingError(f"Could not write briefing output: {error}") from error
 
 
-def archive_files(landing_files: list[Path], archive_path: Path) -> None:
+def archive_files(
+    landing_files: list[Path], archive_path: Path, progress: ProcessingProgress
+) -> None:
     archive_path.parent.mkdir(parents=True, exist_ok=True)
     moved_files: list[tuple[Path, Path]] = []
     try:
         archive_path.mkdir()
         for source_path in landing_files:
+            progress.current_article = source_path.name
             destination_path = archive_path / source_path.name
             source_path.replace(destination_path)
             moved_files.append((source_path, destination_path))
+        progress.current_article = None
     except OSError as error:
         rollback_failures = []
         for source_path, destination_path in reversed(moved_files):

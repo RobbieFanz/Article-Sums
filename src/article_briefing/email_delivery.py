@@ -9,7 +9,7 @@ from time import perf_counter
 import certifi
 
 from article_briefing.config import SmtpSettings
-from article_briefing.models import ArticleSummary, Briefing, RelevanceFailure
+from article_briefing.models import ArticleSummary, Briefing, FailureReport, RelevanceFailure
 
 
 class EmailDeliveryError(RuntimeError):
@@ -29,7 +29,23 @@ class SmtpBriefingSender:
         message["To"] = ", ".join(self._settings.to_addresses)
         message.set_content(render_plain_text(briefing))
         message.add_alternative(render_html(briefing), subtype="html")
+        return self._send_message(message)
 
+    def send_failure(self, failure: FailureReport) -> float:
+        message = EmailMessage()
+        message["Subject"] = "Article Briefing — process failed"
+        message["From"] = self._settings.from_address
+        message["To"] = ", ".join(self._settings.to_addresses)
+        message.set_content(
+            "ARTICLE BRIEFING PROCESS FAILED\n\n"
+            f"Error: {failure.error}\n"
+            f"Process runtime: {format_seconds(failure.duration_seconds)}\n"
+            f"Articles processed: {failure.processed_article_count}\n"
+            f"Article being processed: {failure.current_article or 'None (failure outside article processing)'}\n"
+        )
+        return self._send_message(message)
+
+    def _send_message(self, message: EmailMessage) -> float:
         started_at = perf_counter()
         smtp_class = smtplib.SMTP_SSL if self._settings.use_ssl else smtplib.SMTP
         tls_context = ssl.create_default_context(cafile=certifi.where())

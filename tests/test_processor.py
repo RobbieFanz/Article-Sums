@@ -13,6 +13,7 @@ from article_briefing.models import (
     ArticleSummary,
     Briefing,
     BriefingOverview,
+    FailureReport,
     RelevanceDecision,
 )
 from article_briefing.ollama import OllamaError, OllamaOutputError
@@ -53,15 +54,23 @@ class FakeSender:
         self.duration_seconds = duration_seconds
         self.was_source_file_present_when_sent = False
         self.briefing: object | None = None
+        self.failures: list[FailureReport] = []
 
     def send(self, briefing: object) -> float:
         self.was_source_file_present_when_sent = self.source_file.exists()
         self.briefing = briefing
         return self.duration_seconds
 
+    def send_failure(self, failure: FailureReport) -> float:
+        self.failures.append(failure)
+        return self.duration_seconds
+
 
 class FailingSender:
     def send(self, briefing: object) -> float:
+        raise EmailDeliveryError("SMTP service unavailable")
+
+    def send_failure(self, failure: FailureReport) -> float:
         raise EmailDeliveryError("SMTP service unavailable")
 
 
@@ -118,6 +127,99 @@ class RelevanceRetrySummarizer(FakeSummarizer):
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_fatal_article_failure_sends_progress_and_preserves_original_error(self) -> None:
+        class FatalSummarizer(FakeSummarizer):
+            def assess_relevance(self, article: Article) -> RelevanceDecision:
+                if article.source_file == "b-fail.txt":
+                    raise OllamaError("model unavailable")
+                return super().assess_relevance(article)
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory))
+            settings.landing_dir.mkdir(parents=True)
+            for name in ("a-done.txt", "b-fail.txt", "c-pending.txt"):
+                (settings.landing_dir / name).write_text("Article text", encoding="utf-8")
+            sender = FakeSender(settings.landing_dir / "a-done.txt")
+
+            with self.assertRaisesRegex(OllamaError, "model unavailable"):
+                process_landing_folder(settings, FatalSummarizer(), sender=sender)
+
+            self.assertEqual(len(sender.failures), 1)
+            failure = sender.failures[0]
+            self.assertEqual(failure.error, "OllamaError: model unavailable")
+            self.assertEqual(failure.processed_article_count, 1)
+            self.assertEqual(failure.current_article, "b-fail.txt")
+            self.assertGreaterEqual(failure.duration_seconds, 0)
+            self.assertEqual(len(list(settings.landing_dir.glob("*.txt"))), 3)
+            self.assertFalse(settings.archive_dir.exists())
+
+    def test_failure_after_articles_has_no_current_article(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory))
+            settings.landing_dir.mkdir(parents=True)
+            source = settings.landing_dir / "done.txt"
+            source.write_text("Article text", encoding="utf-8")
+            sender = FakeSender(source)
+            with patch("article_briefing.processor.write_briefing", side_effect=OSError("disk full")):
+                with self.assertRaisesRegex(OSError, "disk full"):
+                    process_landing_folder(settings, FakeSummarizer(), sender=sender)
+            self.assertEqual(sender.failures[0].processed_article_count, 1)
+            self.assertIsNone(sender.failures[0].current_article)
+            self.assertTrue(source.exists())
+
+    def test_archive_failure_reports_failing_article_and_restores_files(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory))
+            settings.landing_dir.mkdir(parents=True)
+            source = settings.landing_dir / "done.txt"
+            source.write_text("Article text", encoding="utf-8")
+            sender = FakeSender(source)
+            with patch.object(Path, "replace", side_effect=OSError("disk full")):
+                # Fail while archiving, not while writing the briefing.
+                with patch("article_briefing.processor.write_briefing"):
+                    with self.assertRaisesRegex(ProcessingError, "disk full"):
+                        process_landing_folder(settings, FakeSummarizer(), sender=sender)
+            self.assertEqual(sender.failures[0].processed_article_count, 1)
+            self.assertEqual(sender.failures[0].current_article, "done.txt")
+            self.assertTrue(source.exists())
+
+    def test_failure_notification_failure_does_not_hide_original(self) -> None:
+        from unittest.mock import patch
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory))
+            settings.landing_dir.mkdir(parents=True)
+            (settings.landing_dir / "article.txt").write_text("Article text", encoding="utf-8")
+            with patch("sys.stderr") as stderr:
+                with self.assertRaisesRegex(EmailDeliveryError, "SMTP service unavailable"):
+                    process_landing_folder(settings, FakeSummarizer(), sender=FailingSender())
+            self.assertIn("Could not send failure notification", "".join(
+                call.args[0] for call in stderr.write.call_args_list
+            ))
+
+    def test_delivery_failure_attempts_separate_failure_notification(self) -> None:
+        class RecoverySender(FakeSender):
+            def send(self, briefing: object) -> float:
+                raise EmailDeliveryError("first delivery failed")
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            settings = make_settings(Path(temporary_directory))
+            settings.landing_dir.mkdir(parents=True)
+            source = settings.landing_dir / "article.txt"
+            source.write_text("Article text", encoding="utf-8")
+            sender = RecoverySender(source)
+            with self.assertRaisesRegex(EmailDeliveryError, "first delivery failed"):
+                process_landing_folder(settings, FakeSummarizer(), sender=sender)
+            self.assertEqual(len(sender.failures), 1)
+            self.assertIn("first delivery failed", sender.failures[0].error)
+            self.assertEqual(sender.failures[0].processed_article_count, 1)
+            self.assertIsNone(sender.failures[0].current_article)
+            self.assertTrue(source.exists())
+
     def test_mixed_articles_keep_rejected_out_of_overview_but_in_email(self) -> None:
         class MixedSummarizer(FakeSummarizer):
             overview_titles: list[str]
@@ -310,6 +412,8 @@ class ProcessorTests(unittest.TestCase):
             self.assertGreater(briefing["total_duration_seconds"], 0)
 
     def test_delivery_failure_keeps_source_file_in_landing_folder(self) -> None:
+        from unittest.mock import patch
+
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             settings = make_settings(root)
@@ -320,9 +424,12 @@ class ProcessorTests(unittest.TestCase):
                 encoding="utf-8",
             )
 
-            with self.assertRaises(EmailDeliveryError):
+            with patch("sys.stderr") as stderr, self.assertRaises(EmailDeliveryError):
                 process_landing_folder(settings, FakeSummarizer(), sender=FailingSender())
 
+            self.assertIn("Could not send failure notification", "".join(
+                call.args[0] for call in stderr.write.call_args_list
+            ))
             self.assertTrue(source_file.exists())
             self.assertFalse(settings.archive_dir.exists())
 

@@ -10,11 +10,30 @@ from article_briefing.models import (
     ArticleNotSelected,
     Briefing,
     BriefingOverview,
+    FailureReport,
     RelevanceFailure,
 )
 
 
 class SmtpBriefingSenderTests(unittest.TestCase):
+    @patch("article_briefing.email_delivery.smtplib.SMTP")
+    def test_sends_failure_notification_with_progress(self, smtp_class: MagicMock) -> None:
+        smtp_client = smtp_class.return_value.__enter__.return_value
+        sender = SmtpBriefingSender(make_smtp_settings())
+        sender.send_failure(FailureReport(
+            error="OllamaError: model unavailable",
+            duration_seconds=125.4,
+            processed_article_count=3,
+            current_article="failed.txt",
+        ))
+        message = smtp_client.send_message.call_args.args[0]
+        self.assertIn("process failed", message["Subject"])
+        body = message.get_body("plain").get_content()
+        self.assertIn("OllamaError: model unavailable", body)
+        self.assertIn("2 minutes 5.4 seconds", body)
+        self.assertIn("Articles processed: 3", body)
+        self.assertIn("failed.txt", body)
+
     @patch("article_briefing.email_delivery.smtplib.SMTP")
     def test_sends_plain_text_and_html_briefing(self, smtp_class: MagicMock) -> None:
         smtp_client = smtp_class.return_value.__enter__.return_value

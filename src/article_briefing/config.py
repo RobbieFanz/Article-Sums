@@ -83,7 +83,12 @@ class Settings:
     @classmethod
     def from_environment(cls, project_root: Path) -> "Settings":
         load_dotenv(project_root / ".env")
+        return cls.from_loaded_environment(project_root)
 
+    @classmethod
+    def from_loaded_environment(
+        cls, project_root: Path, *, smtp: SmtpSettings | None = None
+    ) -> "Settings":
         model = required_environment("OLLAMA_MODEL")
         timeout = positive_float("OLLAMA_TIMEOUT_SECONDS", 180)
         maximum_characters = positive_integer("MAX_ARTICLE_CHARACTERS", 24000)
@@ -116,7 +121,7 @@ class Settings:
             max_article_characters=maximum_characters,
             relevance_criteria=relevance_criteria,
             relevance_max_article_characters=relevance_maximum_characters,
-            smtp=SmtpSettings.from_environment(),
+            smtp=smtp if smtp is not None else SmtpSettings.from_environment(),
         )
 
 

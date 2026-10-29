@@ -212,3 +212,12 @@ contains the short overview followed by the individual article summaries and
 their timings. Source files move from `data/landing/` to `data/archive/` only
 after SMTP delivery succeeds. If delivery fails, the files remain in the
 landing folder for a later retry.
+
+If a run aborts, an enabled SMTP sender attempts a separate failure email with
+the error, elapsed time, the number of articles fully processed (including
+rejections and handled per-article failures), and the file being processed, if
+any. A failure outside article processing is reported as such. If notification
+delivery also fails, the original error and the notification error are reported
+on stderr. No failure email can be sent if SMTP is disabled or its configuration
+cannot be loaded. Handled article and overview errors remain in the normal
+briefing rather than triggering a separate failure email.

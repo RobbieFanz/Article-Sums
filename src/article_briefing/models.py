@@ -56,6 +56,14 @@ class ArticleNotSelected:
 
 
 @dataclass(frozen=True)
+class FailureReport:
+    error: str
+    duration_seconds: float
+    processed_article_count: int
+    current_article: str | None
+
+
+@dataclass(frozen=True)
 class BriefingOverview:
     overview: str
     major_themes: list[str]

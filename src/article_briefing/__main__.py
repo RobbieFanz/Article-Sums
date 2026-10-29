@@ -2,19 +2,34 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from time import perf_counter
 
-from article_briefing.config import ConfigurationError, Settings
+from article_briefing.config import ConfigurationError, Settings, SmtpSettings, load_dotenv
 from article_briefing.email_delivery import EmailDeliveryError, SmtpBriefingSender
 from article_briefing.ollama import OllamaClient, OllamaError
-from article_briefing.processor import ProcessingError, process_landing_folder
+from article_briefing.processor import (
+    ProcessingError,
+    ProcessingProgress,
+    notify_failure,
+    process_landing_folder,
+)
 
 
 def main() -> None:
     project_root = Path.cwd()
+    started_at = perf_counter()
     try:
-        settings = Settings.from_environment(project_root)
-        sender = SmtpBriefingSender(settings.smtp) if settings.smtp.enabled else None
-        result = process_landing_folder(settings, OllamaClient(settings), sender=sender)
+        load_dotenv(project_root / ".env")
+        smtp = SmtpSettings.from_environment()
+        sender = SmtpBriefingSender(smtp) if smtp.enabled else None
+        try:
+            settings = Settings.from_loaded_environment(project_root, smtp=smtp)
+            summarizer = OllamaClient(settings)
+        except Exception as error:
+            if sender is not None:
+                notify_failure(sender, error, started_at, ProcessingProgress())
+            raise
+        result = process_landing_folder(settings, summarizer, sender=sender)
     except (ConfigurationError, EmailDeliveryError, OllamaError, ProcessingError) as error:
         print(f"Error: {error}", file=sys.stderr)
         raise SystemExit(1) from error
