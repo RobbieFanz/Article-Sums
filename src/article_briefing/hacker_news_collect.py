@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import io
 import re
 import ssl
 import sys
 import unicodedata
+import zlib
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
@@ -166,6 +169,7 @@ def download_page(url: str, timeout_seconds: float) -> DownloadedPage:
         url,
         headers={
             "Accept": "text/html,application/xhtml+xml",
+            "Accept-Encoding": "gzip",
             "User-Agent": "ArticleBriefing/0.1 (private self-hosted article reader)",
         },
     )
@@ -185,6 +189,23 @@ def download_page(url: str, timeout_seconds: float) -> DownloadedPage:
             if len(body) > MAX_PAGE_BYTES:
                 raise ArticleCollectionError(
                     f"Page exceeded the {MAX_PAGE_BYTES // (1024 * 1024)} MB download limit."
+                )
+            content_encoding = response.headers.get("Content-Encoding", "").strip().lower()
+            if content_encoding == "gzip":
+                try:
+                    with gzip.GzipFile(fileobj=io.BytesIO(body)) as compressed:
+                        body = compressed.read(MAX_PAGE_BYTES + 1)
+                except (OSError, EOFError, zlib.error) as error:
+                    raise ArticleCollectionError(
+                        "Page contained invalid compressed data."
+                    ) from error
+                if len(body) > MAX_PAGE_BYTES:
+                    raise ArticleCollectionError(
+                        f"Page exceeded the {MAX_PAGE_BYTES // (1024 * 1024)} MB download limit."
+                    )
+            elif content_encoding not in {"", "identity"}:
+                raise ArticleCollectionError(
+                    f"Page used an unsupported content encoding: {content_encoding}."
                 )
             charset = response.headers.get_content_charset() or "utf-8"
         html = body.decode(charset)

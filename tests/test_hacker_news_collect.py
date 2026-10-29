@@ -1,15 +1,100 @@
 from __future__ import annotations
 
+import gzip
+import io
 import tempfile
 import unittest
+from email.message import Message
 from pathlib import Path
+from unittest.mock import patch
 
 from article_briefing.hacker_news import HackerNewsStory
 from article_briefing.hacker_news_collect import (
+    ArticleCollectionError,
     CollectionStatus,
     DownloadedPage,
     HackerNewsArticleCollector,
+    download_page,
 )
+
+
+class FakePageResponse(io.BytesIO):
+    def __init__(
+        self, body: bytes, content_type: str = "text/html; charset=utf-8",
+        content_encoding: str | None = None,
+    ) -> None:
+        super().__init__(body)
+        self.headers = Message()
+        self.headers["Content-Type"] = content_type
+        if content_encoding is not None:
+            self.headers["Content-Encoding"] = content_encoding
+
+    def geturl(self) -> str:
+        return "https://example.com/final"
+
+
+class DownloadPageTests(unittest.TestCase):
+    def test_decodes_uncompressed_html(self) -> None:
+        response = FakePageResponse(b"<html>plain</html>")
+        with patch("article_briefing.hacker_news_collect.urlopen", return_value=response) as urlopen:
+            page = download_page("https://example.com/article", 5)
+
+        self.assertEqual(page, DownloadedPage("https://example.com/final", "<html>plain</html>"))
+        self.assertEqual(urlopen.call_args.args[0].get_header("Accept-encoding"), "gzip")
+
+    def test_decodes_gzip_html_using_declared_charset(self) -> None:
+        html = "<html>caf\u00e9</html>"
+        response = FakePageResponse(
+            gzip.compress(html.encode("iso-8859-1")),
+            "text/html; charset=iso-8859-1",
+            "gzip",
+        )
+        with patch("article_briefing.hacker_news_collect.urlopen", return_value=response):
+            page = download_page("https://example.com/article", 5)
+
+        self.assertEqual(page, DownloadedPage("https://example.com/final", html))
+
+    def test_rejects_decompressed_pages_over_limit(self) -> None:
+        response = FakePageResponse(gzip.compress(b"x" * 101), content_encoding="gzip")
+        with (
+            patch("article_briefing.hacker_news_collect.MAX_PAGE_BYTES", 100),
+            patch("article_briefing.hacker_news_collect.urlopen", return_value=response),
+            self.assertRaisesRegex(ArticleCollectionError, "download limit"),
+        ):
+            download_page("https://example.com/article", 5)
+
+    def test_rejects_invalid_gzip(self) -> None:
+        response = FakePageResponse(b"not gzip", content_encoding="gzip")
+        with (
+            patch("article_briefing.hacker_news_collect.urlopen", return_value=response),
+            self.assertRaisesRegex(ArticleCollectionError, "compressed"),
+        ):
+            download_page("https://example.com/article", 5)
+
+    def test_rejects_truncated_gzip(self) -> None:
+        response = FakePageResponse(gzip.compress(b"html")[:-4], content_encoding="gzip")
+        with (
+            patch("article_briefing.hacker_news_collect.urlopen", return_value=response),
+            self.assertRaisesRegex(ArticleCollectionError, "compressed"),
+        ):
+            download_page("https://example.com/article", 5)
+
+    def test_rejects_downloads_over_limit(self) -> None:
+        response = FakePageResponse(b"x" * 101)
+        with (
+            patch("article_briefing.hacker_news_collect.MAX_PAGE_BYTES", 100),
+            patch("article_briefing.hacker_news_collect.urlopen", return_value=response),
+            self.assertRaisesRegex(ArticleCollectionError, "download limit"),
+        ):
+            download_page("https://example.com/article", 5)
+
+    def test_rejects_unsupported_content_encoding(self) -> None:
+        response = FakePageResponse(b"some data", content_encoding="br")
+        with (
+            patch("article_briefing.hacker_news_collect.urlopen", return_value=response),
+            self.assertRaisesRegex(ArticleCollectionError, "content encoding"),
+        ):
+            download_page("https://example.com/article", 5)
 
 
 class FakeHackerNewsClient:
@@ -130,6 +215,33 @@ class HackerNewsArticleCollectorTests(unittest.TestCase):
             )
             self.assertIn("not valid UTF-8", results[0].detail)
             self.assertTrue((landing_dir / "hn-2-valid-article.txt").exists())
+
+    def test_invalid_compressed_page_does_not_stop_next_article(self) -> None:
+        stories = [
+            make_story(id=1, title="Invalid", url="https://example.com/invalid"),
+            make_story(id=2, title="Valid", url="https://example.com/valid"),
+        ]
+        responses = [
+            FakePageResponse(b"not gzip", content_encoding="gzip"),
+            FakePageResponse(gzip.compress(b"<html>valid</html>"), content_encoding="gzip"),
+        ]
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            collector = HackerNewsArticleCollector(
+                client=FakeHackerNewsClient(stories),
+                landing_dir=Path(temporary_directory),
+                timeout_seconds=5,
+                minimum_text_characters=1,
+                article_extractor=lambda html, url: html,
+            )
+            with patch("article_briefing.hacker_news_collect.urlopen", side_effect=responses):
+                results = collector.collect_top_stories(limit=2)
+
+            self.assertEqual(
+                [result.status for result in results],
+                [CollectionStatus.FAILED, CollectionStatus.CREATED],
+            )
+            self.assertIn("invalid compressed data", results[0].detail)
+            self.assertTrue((Path(temporary_directory) / "hn-2-valid.txt").exists())
 
     def test_non_utf8_text_cannot_be_written_and_is_skipped(self) -> None:
         story = make_story()

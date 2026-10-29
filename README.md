@@ -73,10 +73,11 @@ landing files, or less than 500 extracted characters are skipped and reported
 in the terminal. The collector does not bypass login pages, paywalls, CAPTCHAs,
 or bot protections.
 
-Malformed story URLs, unsupported character encodings, invalid UTF-8 page text,
-article-extraction failures, and landing-file write failures are isolated to
-that story. The collector reports the failure and continues with the remaining
-Hacker News stories.
+The collector supports gzip-compressed HTML and limits both downloaded and
+decompressed page data to 10 MB. Malformed story URLs, unsupported content or
+character encodings, invalid page text, article-extraction failures, and
+landing-file write failures are isolated to that story. The collector reports
+the failure and continues with the remaining Hacker News stories.
 
 ## Landing-file format
 
