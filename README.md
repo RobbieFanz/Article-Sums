@@ -32,6 +32,23 @@ processed files. It can optionally email the briefing.
    ollama list
    ```
 
+## Collect and create a briefing
+
+Run both stages from the project root:
+
+```bash
+python -m article_briefing.run
+```
+
+Alternatively, after installing the project, run `article-briefing-run`.
+Set `HN_ARTICLE_LIMIT` in `.env` to control how many Hacker News top stories
+the collector inspects (default `10`). Skipped, duplicate, or inaccessible
+stories count toward this limit, so fewer articles may be collected. The
+briefing then processes all files in the configured landing folder, including
+files already there. If collection fails, briefing creation does not start.
+Individual story failures are reported by the collector, which continues with
+the other stories.
+
 ## Hacker News top stories
 
 Print current Hacker News front-page stories without invoking Ollama or writing
@@ -240,6 +257,7 @@ contains URLs, which may themselves be sensitive.
 | `OLLAMA_MODEL` | Yes | Model passed to Ollama for every generation |
 | `OLLAMA_BASE_URL` | No | Defaults to `http://127.0.0.1:11434` |
 | `OLLAMA_TIMEOUT_SECONDS` | No | Request timeout, default `180` |
+| `HN_ARTICLE_LIMIT` | No | Top stories inspected by the combined run, default `10` |
 | `LANDING_DIR` | No | Input directory, default `data/landing` |
 | `ARCHIVE_DIR` | No | Archived input directory, default `data/archive` |
 | `BRIEFING_DIR` | No | Generated briefing directory, default `data/briefings` |
