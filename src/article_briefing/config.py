@@ -79,6 +79,8 @@ class Settings:
     relevance_criteria: str = DEFAULT_RELEVANCE_CRITERIA
     relevance_max_article_characters: int = 6000
     smtp: SmtpSettings = field(default_factory=lambda: SmtpSettings(enabled=False))
+    chunked_summarization: bool = False
+    summary_chunk_characters: int = 9500
 
     @classmethod
     def from_environment(cls, project_root: Path) -> "Settings":
@@ -122,6 +124,8 @@ class Settings:
             relevance_criteria=relevance_criteria,
             relevance_max_article_characters=relevance_maximum_characters,
             smtp=smtp if smtp is not None else SmtpSettings.from_environment(),
+            chunked_summarization=boolean_environment("CHUNKED_SUMMARIZATION", False),
+            summary_chunk_characters=positive_integer("SUMMARY_CHUNK_CHARACTERS", 9500),
         )
 
 

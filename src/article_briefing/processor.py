@@ -125,7 +125,10 @@ def _process_landing_folder(
         logger.info("Loading article: %s", path.name)
         progress.current_article = path.name
         try:
-            article = load_article(path, settings.max_article_characters)
+            article = load_article(
+                path,
+                None if settings.chunked_summarization else settings.max_article_characters,
+            )
         except ProcessingError as error:
             logger.info("Skipping invalid article %s: %s", path.name, error)
             warnings.append(str(error))
@@ -308,7 +311,7 @@ def _process_landing_folder(
     )
 
 
-def load_article(path: Path, maximum_characters: int) -> Article:
+def load_article(path: Path, maximum_characters: int | None) -> Article:
     try:
         lines = path.read_text(encoding="utf-8").lstrip("\ufeff").splitlines()
     except UnicodeDecodeError as error:
@@ -325,7 +328,7 @@ def load_article(path: Path, maximum_characters: int) -> Article:
     if not text:
         raise ProcessingError(f"{path.name} has no article text.")
 
-    was_truncated = len(text) > maximum_characters
+    was_truncated = maximum_characters is not None and len(text) > maximum_characters
     return Article(
         source_file=path.name,
         title=path.stem.replace("_", " ").replace("-", " ").strip(),

@@ -1,10 +1,38 @@
 from __future__ import annotations
 
 import os
+import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
-from article_briefing.config import ConfigurationError, SmtpSettings
+from article_briefing.config import ConfigurationError, Settings, SmtpSettings
+
+
+class ChunkSettingsTests(unittest.TestCase):
+    def test_chunk_settings_are_parsed_and_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "criteria.txt").write_text("Relevant", encoding="utf-8")
+            environment = {
+                "OLLAMA_MODEL": "test",
+                "RELEVANCE_CRITERIA_FILE": "criteria.txt",
+                "CHUNKED_SUMMARIZATION": "true",
+                "SUMMARY_CHUNK_CHARACTERS": "32000",
+            }
+            with patch.dict(os.environ, environment, clear=True):
+                settings = Settings.from_loaded_environment(root)
+                self.assertTrue(settings.chunked_summarization)
+                self.assertEqual(settings.summary_chunk_characters, 32000)
+
+            for variable, value in (
+                ("CHUNKED_SUMMARIZATION", "maybe"),
+                ("SUMMARY_CHUNK_CHARACTERS", "0"),
+            ):
+                with self.subTest(variable=variable):
+                    with patch.dict(os.environ, {**environment, variable: value}, clear=True):
+                        with self.assertRaisesRegex(ConfigurationError, variable):
+                            Settings.from_loaded_environment(root)
 
 
 class SmtpSettingsTests(unittest.TestCase):

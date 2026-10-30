@@ -147,6 +147,29 @@ The combined briefing overview is also retried once. If both attempts fail, the
 email and saved briefing state the overview error and still include every valid
 individual article summary.
 
+### Long articles
+
+Set `CHUNKED_SUMMARIZATION=true` to process the entire article without the
+`MAX_ARTICLE_CHARACTERS` truncation. Articles longer than
+`SUMMARY_CHUNK_CHARACTERS` are split into large chunks, each chunk is
+summarized independently, and the chunk summaries are combined into the normal
+article summary. An article of N chunks normally needs N+1 summary requests;
+extra combining requests are used if the chunk summaries themselves exceed the
+chunk limit. Shorter articles use one summary request. Relevance filtering still
+uses only its configured excerpt.
+
+The default chunk limit is 9,500 characters, chosen for a 4,096-token context.
+Characters are not tokens, and prompts and model responses also consume
+context. Adjust `SUMMARY_CHUNK_CHARACTERS` for the allocated context and text;
+even the default does not guarantee that a request fits. Increase it for a
+larger context to reduce calls, or lower it for unusually token-dense text. Long articles
+require more calls and intermediate summaries can omit details. If a chunk or
+combine request fails, the whole article is retried once and remains in the
+landing folder if it still fails.
+
+Set `CHUNKED_SUMMARIZATION=false` to restore the single-request path and its
+`MAX_ARTICLE_CHARACTERS` cap. If the variable is omitted, chunking is disabled.
+
 ## AI relevance filtering
 
 Before creating an article summary, Ollama evaluates each landing-file article
@@ -186,7 +209,9 @@ can still stop the batch before archiving.
 | `LANDING_DIR` | No | Input directory, default `data/landing` |
 | `ARCHIVE_DIR` | No | Archived input directory, default `data/archive` |
 | `BRIEFING_DIR` | No | Generated briefing directory, default `data/briefings` |
-| `MAX_ARTICLE_CHARACTERS` | No | Per-article input cap, default `24000` |
+| `MAX_ARTICLE_CHARACTERS` | No | Per-article input cap when chunking is disabled, default `24000` |
+| `CHUNKED_SUMMARIZATION` | No | Enable full-article chunking, default `false`; `.env.example` enables it |
+| `SUMMARY_CHUNK_CHARACTERS` | No | Approximate per-chunk character limit, default `9500` |
 | `RELEVANCE_CRITERIA_FILE` | No | Criteria text file for AI relevance filtering |
 | `RELEVANCE_MAX_ARTICLE_CHARACTERS` | No | Article excerpt used for relevance triage, default `6000` |
 | `SMTP_ENABLED` | No | Set to `true` to email a successfully generated briefing |

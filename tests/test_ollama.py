@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import json
+from dataclasses import replace
 from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,11 +15,88 @@ from article_briefing.ollama import (
     OllamaError,
     OllamaOutputError,
     key_points_or_fallback,
+    split_article_text,
 )
 from article_briefing.processor import summarize_article_with_retry
 
 
 class OllamaResponseTests(unittest.TestCase):
+    def test_split_preserves_text_with_minimum_number_of_chunks(self) -> None:
+        text = "a" * 7 + "\n\n" + "b" * 11
+        chunks = split_article_text(text, 10)
+        self.assertEqual(len(chunks), 2)
+        self.assertEqual("".join(chunks), text)
+        self.assertTrue(all(len(chunk) <= 10 for chunk in chunks))
+
+    def test_chunking_summarizes_all_chunks_then_combines_them(self) -> None:
+        client = make_client(chunked=True, chunk_size=10)
+        article = replace(make_article(), text="abcdefghijABCDEFGHIJ12345")
+        final = {
+            "summary": "Whole article.",
+            "key_points": ["One point."],
+            "why_it_matters": "It matters.",
+            "read_recommendation": "Read it.",
+        }
+        responses = [
+            ({"summary": value}, "") for value in ("1", "2", "3")
+        ] + [(final, "")]
+        with patch.object(client, "_request_json", side_effect=responses) as request:
+            result = client.summarize_article(article)
+
+        self.assertEqual(request.call_count, 4)
+        prompts = [call.kwargs["user_prompt"] for call in request.call_args_list]
+        for chunk, prompt in zip(("abcdefghij", "ABCDEFGHIJ", "12345"), prompts):
+            self.assertIn(chunk, prompt)
+        self.assertIn("1\n\n2\n\n3", prompts[-1])
+        self.assertEqual(result.summary, "Whole article.")
+        self.assertIn("summarized in chunks", result.input_note)
+
+    def test_short_article_and_disabled_chunking_use_one_request(self) -> None:
+        final = {
+            "summary": "Whole article.",
+            "key_points": ["One point."],
+            "why_it_matters": "It matters.",
+            "read_recommendation": "Read it.",
+        }
+        for enabled, text in ((True, "short"), (False, "x" * 25)):
+            with self.subTest(enabled=enabled):
+                client = make_client(chunked=enabled, chunk_size=10)
+                with patch.object(client, "_request_json", return_value=(final, "")) as request:
+                    summary = client.summarize_article(replace(make_article(), text=text))
+                request.assert_called_once()
+                self.assertIn(text, request.call_args.kwargs["user_prompt"])
+                self.assertNotIn("summarized in chunks", summary.input_note)
+
+    def test_large_intermediate_summaries_are_reduced_before_final_request(self) -> None:
+        client = make_client(chunked=True, chunk_size=15)
+        final = {
+            "summary": "Combined.",
+            "why_it_matters": "It matters.",
+            "read_recommendation": "Read it.",
+        }
+        responses = [
+            ({"summary": value}, "") for value in ("aaaaaa", "bbbbbb", "cccccc", "merged")
+        ] + [(final, "")]
+        with patch.object(client, "_request_json", side_effect=responses) as request:
+            client.summarize_article(replace(make_article(), text="x" * 31))
+        self.assertEqual(request.call_count, 5)
+        self.assertIn("aaaaaa\n\nbbbbbb", request.call_args_list[3].kwargs["user_prompt"])
+        self.assertIn("merged\n\ncccccc", request.call_args_list[4].kwargs["user_prompt"])
+
+    def test_oversized_intermediate_summary_fails_explicitly(self) -> None:
+        client = make_client(chunked=True, chunk_size=10)
+        responses = [({"summary": "x" * 11}, ""), ({"summary": "other"}, "")]
+        with patch.object(client, "_request_json", side_effect=responses):
+            with self.assertRaisesRegex(OllamaError, "exceeds SUMMARY_CHUNK_CHARACTERS"):
+                client.summarize_article(replace(make_article(), text="x" * 11))
+
+    def test_invalid_chunk_output_fails_instead_of_combining_partial_results(self) -> None:
+        client = make_client(chunked=True, chunk_size=10)
+        with patch.object(client, "_request_json", return_value=({}, "")) as request:
+            with self.assertRaisesRegex(OllamaError, "'summary'"):
+                client.summarize_article(replace(make_article(), text="x" * 11))
+        request.assert_called_once()
+
     @patch("article_briefing.ollama.urlopen")
     def test_logs_each_complete_response_and_summary_retry(self, urlopen: MagicMock) -> None:
         client = make_client()
@@ -120,7 +198,7 @@ class OllamaResponseTests(unittest.TestCase):
             client._request_json("System prompt", "User prompt")
 
 
-def make_client() -> OllamaClient:
+def make_client(*, chunked: bool = False, chunk_size: int = 100000) -> OllamaClient:
     root = Path("/tmp/article-briefing-test")
     return OllamaClient(
         Settings(
@@ -132,6 +210,8 @@ def make_client() -> OllamaClient:
             archive_dir=root / "archive",
             briefing_dir=root / "briefings",
             max_article_characters=24000,
+            chunked_summarization=chunked,
+            summary_chunk_characters=chunk_size,
         )
     )
 

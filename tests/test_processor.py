@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -127,6 +128,31 @@ class RelevanceRetrySummarizer(FakeSummarizer):
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_chunking_loads_full_article_while_disabled_mode_retains_cap(self) -> None:
+        class CaptureSummarizer(FakeSummarizer):
+            def __init__(self) -> None:
+                self.article: Article | None = None
+
+            def summarize_article(self, article: Article) -> ArticleSummary:
+                self.article = article
+                return super().summarize_article(article)
+
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled), tempfile.TemporaryDirectory() as directory:
+                settings = replace(
+                    make_settings(Path(directory)),
+                    max_article_characters=10,
+                    chunked_summarization=enabled,
+                )
+                settings.landing_dir.mkdir(parents=True)
+                (settings.landing_dir / "article.txt").write_text("x" * 25, encoding="utf-8")
+                summarizer = CaptureSummarizer()
+                process_landing_folder(settings, summarizer)
+                self.assertIsNotNone(summarizer.article)
+                assert summarizer.article is not None
+                self.assertEqual(len(summarizer.article.text), 25 if enabled else 10)
+                self.assertEqual(summarizer.article.was_truncated, not enabled)
+
     def test_fatal_article_failure_sends_progress_and_preserves_original_error(self) -> None:
         class FatalSummarizer(FakeSummarizer):
             def assess_relevance(self, article: Article) -> RelevanceDecision:
