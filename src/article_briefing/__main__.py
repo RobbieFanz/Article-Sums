@@ -7,6 +7,7 @@ from time import perf_counter
 
 from article_briefing.config import ConfigurationError, Settings, SmtpSettings, load_dotenv
 from article_briefing.email_delivery import EmailDeliveryError, SmtpBriefingSender
+from article_briefing.history import HistoryError
 from article_briefing.ollama import OllamaClient, OllamaError
 from article_briefing.processor import (
     ProcessingError,
@@ -40,7 +41,7 @@ def main() -> None:
                 notify_failure(sender, error, started_at, ProcessingProgress())
             raise
         result = process_landing_folder(settings, summarizer, sender=sender)
-    except (ConfigurationError, EmailDeliveryError, OllamaError, ProcessingError) as error:
+    except (ConfigurationError, EmailDeliveryError, HistoryError, OllamaError, ProcessingError) as error:
         print(f"Error: {error}", file=sys.stderr)
         raise SystemExit(1) from error
 

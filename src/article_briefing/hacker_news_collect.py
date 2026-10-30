@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import gzip
 import io
+import os
 import re
 import ssl
 import sys
@@ -20,6 +21,7 @@ import certifi
 import trafilatura
 from lxml.etree import LxmlError
 
+from article_briefing.config import ConfigurationError, load_dotenv, resolve_project_path
 from article_briefing.hacker_news import (
     DEFAULT_STORY_LIMIT,
     DEFAULT_TIMEOUT_SECONDS,
@@ -29,6 +31,8 @@ from article_briefing.hacker_news import (
     positive_float,
     positive_integer,
 )
+from article_briefing.history import ArticleHistory, DEFAULT_HISTORY_PATH, HistoryError
+from article_briefing.processor import ProcessingError, load_article
 
 
 DEFAULT_LANDING_DIR = Path("data/landing")
@@ -69,6 +73,7 @@ class HackerNewsArticleCollector:
         minimum_text_characters: int,
         page_downloader: Callable[[str, float], DownloadedPage] = None,
         article_extractor: Callable[[str, str], str | None] = None,
+        history_path: Path | None = None,
     ) -> None:
         self._client = client
         self._landing_dir = landing_dir
@@ -76,6 +81,19 @@ class HackerNewsArticleCollector:
         self._minimum_text_characters = minimum_text_characters
         self._page_downloader = page_downloader or download_page
         self._article_extractor = article_extractor or extract_article_text
+        default_directory = landing_dir.parent if landing_dir.name == "landing" else landing_dir
+        self._history = ArticleHistory(history_path or default_directory / DEFAULT_HISTORY_PATH.name)
+
+    def _find_landing_file(self, url: str) -> Path | None:
+        for path in self._landing_dir.glob("*.txt"):
+            try:
+                article = load_article(path, None)
+            except (OSError, ProcessingError) as error:
+                print(f"Warning: Could not inspect {path}: {error}", file=sys.stderr)
+                continue
+            if article.url == url:
+                return path
+        return None
 
     def collect_top_stories(self, limit: int) -> list[CollectionResult]:
         self._landing_dir.mkdir(parents=True, exist_ok=True)
@@ -107,6 +125,16 @@ class HackerNewsArticleCollector:
                 "The linked URL is not a public HTTP(S) URL.",
             )
 
+        if self._history.contains(story.url):
+            return CollectionResult(story, CollectionStatus.SKIPPED, "Article already collected or processed.")
+
+        existing_file = self._find_landing_file(story.url)
+        if existing_file is not None:
+            self._history.record_collected(story.url, story.url, existing_file)
+            return CollectionResult(
+                story, CollectionStatus.SKIPPED, "Article already in the landing folder.", existing_file
+            )
+
         try:
             destination = self._landing_dir / landing_filename(story)
         except (UnicodeError, ValueError) as error:
@@ -128,6 +156,18 @@ class HackerNewsArticleCollector:
             if not is_public_http_url(page.url):
                 raise ArticleCollectionError(
                     "The final redirected URL is not a public HTTP(S) URL."
+                )
+            if self._history.contains(page.url):
+                self._history.add_alias(page.url, story.url)
+                return CollectionResult(
+                    story, CollectionStatus.SKIPPED, "Redirected article already collected or processed."
+                )
+            existing_file = self._find_landing_file(page.url)
+            if existing_file is not None:
+                self._history.record_collected(story.url, page.url, existing_file)
+                return CollectionResult(
+                    story, CollectionStatus.SKIPPED, "Redirected article already in the landing folder.",
+                    existing_file,
                 )
             text = self._article_extractor(page.html, page.url)
         except ArticleCollectionError as error:
@@ -156,6 +196,16 @@ class HackerNewsArticleCollector:
                 CollectionStatus.FAILED,
                 f"Could not write landing file: {error}",
             )
+        try:
+            self._history.record_collected(story.url, page.url, destination)
+        except HistoryError:
+            try:
+                destination.unlink()
+            except OSError as error:
+                raise HistoryError(
+                    f"Could not record collection or remove {destination}: {error}"
+                ) from error
+            raise
         return CollectionResult(
             story,
             CollectionStatus.CREATED,
@@ -314,6 +364,12 @@ def parse_arguments() -> argparse.Namespace:
         help=f"Directory for extracted article text (default: {DEFAULT_LANDING_DIR}).",
     )
     parser.add_argument(
+        "--database",
+        type=Path,
+        default=None,
+        help="Article history database (defaults to ARTICLE_HISTORY_PATH or data/article-history.sqlite3).",
+    )
+    parser.add_argument(
         "--timeout",
         type=positive_float,
         default=DEFAULT_TIMEOUT_SECONDS,
@@ -333,15 +389,21 @@ def parse_arguments() -> argparse.Namespace:
 
 def main() -> None:
     arguments = parse_arguments()
-    collector = HackerNewsArticleCollector(
-        client=HackerNewsClient(timeout_seconds=arguments.timeout),
-        landing_dir=arguments.landing_dir,
-        timeout_seconds=arguments.timeout,
-        minimum_text_characters=arguments.minimum_text_characters,
-    )
     try:
+        project_root = Path.cwd()
+        load_dotenv(project_root / ".env")
+        history_path = arguments.database or resolve_project_path(
+            project_root, os.getenv("ARTICLE_HISTORY_PATH", str(DEFAULT_HISTORY_PATH))
+        )
+        collector = HackerNewsArticleCollector(
+            client=HackerNewsClient(timeout_seconds=arguments.timeout),
+            landing_dir=arguments.landing_dir,
+            timeout_seconds=arguments.timeout,
+            minimum_text_characters=arguments.minimum_text_characters,
+            history_path=history_path,
+        )
         results = collector.collect_top_stories(arguments.limit)
-    except HackerNewsError as error:
+    except (ConfigurationError, HackerNewsError, HistoryError) as error:
         print(f"Error: {error}", file=sys.stderr)
         raise SystemExit(1) from error
     print(render_results(results))

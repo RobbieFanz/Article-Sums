@@ -73,6 +73,13 @@ landing files, or less than 500 extracted characters are skipped and reported
 in the terminal. The collector does not bypass login pages, paywalls, CAPTCHAs,
 or bot protections.
 
+The collector checks the local article history before downloading. It skips
+links already processed and links with an existing landing file, including
+links supplied manually in landing files. It records both the submitted link
+and final redirected link when known. A previously unseen redirect can only be
+recognized after its page is requested. Matching uses the exact URL; different
+URL variants are not automatically normalized.
+
 The collector supports gzip-compressed HTML and limits both downloaded and
 decompressed page data to 10 MB. Malformed story URLs, unsupported content or
 character encodings, invalid page text, article-extraction failures, and
@@ -203,6 +210,29 @@ and relevance-rejected files are archived after successful delivery (or after
 saving if email is disabled). Errors from Ollama or briefing-output creation
 can still stop the batch before archiving.
 
+## Article history
+
+The local SQLite database at `data/article-history.sqlite3` tracks collected
+and processed links, timestamps, and whether processed articles were relevant.
+When relevance triage fails but a fallback summary succeeds, the relevance is
+unknown. No article text or summaries are stored in the database; archived
+files and briefings remain the main way to browse past work. Articles without
+a valid link cannot be tracked by URL.
+
+History starts with new activity; existing archives are not imported. A pending
+link is eligible for collection again if its landing file is removed. Failed
+downloads are not recorded, and failed summaries remain in the landing folder
+for processing again. URL-bearing files supplied manually are recorded as
+pending when processing starts. Database errors are reported rather than silently
+disabling duplicate checks.
+
+Set `ARTICLE_HISTORY_PATH` to use another database location for both commands,
+or pass `--database` to the collector for a one-off override. Use the same
+database for collection and processing. The default database and SQLite
+sidecars are ignored by Git; if using a custom extension or location inside
+the repository, ensure it and its sidecars are ignored as well. The database
+contains URLs, which may themselves be sensitive.
+
 ## Configuration
 
 | Variable | Required | Purpose |
@@ -213,6 +243,7 @@ can still stop the batch before archiving.
 | `LANDING_DIR` | No | Input directory, default `data/landing` |
 | `ARCHIVE_DIR` | No | Archived input directory, default `data/archive` |
 | `BRIEFING_DIR` | No | Generated briefing directory, default `data/briefings` |
+| `ARTICLE_HISTORY_PATH` | No | SQLite article history, default `data/article-history.sqlite3` |
 | `MAX_ARTICLE_CHARACTERS` | No | Per-article input cap when chunking is disabled, default `24000` |
 | `CHUNKED_SUMMARIZATION` | No | Enable full-article chunking, default `false`; `.env.example` enables it |
 | `SUMMARY_CHUNK_CHARACTERS` | No | Approximate per-chunk character limit, default `9500` |

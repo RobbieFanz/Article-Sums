@@ -4,6 +4,8 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from article_briefing.history import DEFAULT_HISTORY_PATH
+
 
 class ConfigurationError(ValueError):
     """Raised when configuration is missing or invalid."""
@@ -81,6 +83,7 @@ class Settings:
     smtp: SmtpSettings = field(default_factory=lambda: SmtpSettings(enabled=False))
     chunked_summarization: bool = False
     summary_chunk_characters: int = 9500
+    history_path: Path | None = None
 
     @classmethod
     def from_environment(cls, project_root: Path) -> "Settings":
@@ -126,6 +129,9 @@ class Settings:
             smtp=smtp if smtp is not None else SmtpSettings.from_environment(),
             chunked_summarization=boolean_environment("CHUNKED_SUMMARIZATION", False),
             summary_chunk_characters=positive_integer("SUMMARY_CHUNK_CHARACTERS", 9500),
+            history_path=resolve_project_path(
+                project_root, os.getenv("ARTICLE_HISTORY_PATH", str(DEFAULT_HISTORY_PATH))
+            ),
         )
 
 

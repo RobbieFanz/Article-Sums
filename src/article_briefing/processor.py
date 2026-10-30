@@ -11,6 +11,7 @@ from typing import Protocol
 from urllib.parse import urlparse
 
 from article_briefing.config import Settings
+from article_briefing.history import ArticleHistory, DEFAULT_HISTORY_PATH, HistoryError
 from article_briefing.models import (
     Article,
     ArticleNotSelected,
@@ -115,6 +116,7 @@ def _process_landing_folder(
     if not landing_files:
         return ProcessingResult(briefing_path=None, warnings=())
 
+    history = ArticleHistory(settings.history_path or settings.project_root / DEFAULT_HISTORY_PATH)
     articles: list[Article] = []
     processed_files: list[Path] = []
     warnings: list[str] = []
@@ -142,6 +144,8 @@ def _process_landing_folder(
             progress.current_article = None
             continue
         articles.append(article)
+        if article.url and not history.contains(article.url):
+            history.record_collected(article.url, article.url, path)
         logger.info(
             "Loaded %s: %d characters%s.",
             path.name,
@@ -154,6 +158,7 @@ def _process_landing_folder(
     summaries: list[ArticleSummary] = []
     relevance_failures: list[RelevanceFailure] = []
     archived_files: list[Path] = []
+    processed_urls: list[tuple[str, bool | None]] = []
     not_included_article_count = len(articles_not_selected)
     for article, source_file in zip(articles, processed_files, strict=True):
         progress.current_article = source_file.name
@@ -191,6 +196,8 @@ def _process_landing_folder(
             )
             logger.info("Saved fallback summary for %s outside the main briefing.", source_file.name)
             archived_files.append(source_file)
+            if article.url:
+                processed_urls.append((article.url, None))
             not_included_article_count += 1
             progress.processed_article_count += 1
             progress.current_article = None
@@ -207,6 +214,8 @@ def _process_landing_folder(
                 )
             )
             archived_files.append(source_file)
+            if article.url:
+                processed_urls.append((article.url, False))
             not_included_article_count += 1
             progress.processed_article_count += 1
             progress.current_article = None
@@ -232,6 +241,8 @@ def _process_landing_folder(
             progress.current_article = None
             continue
         archived_files.append(source_file)
+        if article.url:
+            processed_urls.append((article.url, True))
         logger.info("Summary accepted for %s.", source_file.name)
         progress.processed_article_count += 1
         progress.current_article = None
@@ -271,6 +282,27 @@ def _process_landing_folder(
     if archived_files:
         logger.info("Archiving %d article(s) to %s.", len(archived_files), archive_path)
         archive_files(archived_files, archive_path, progress)
+        try:
+            history.record_processed(processed_urls)
+        except HistoryError as error:
+            rollback_failures: list[str] = []
+            for source_path in reversed(archived_files):
+                try:
+                    if source_path.exists():
+                        raise OSError(f"Cannot restore {source_path}: file already exists")
+                    (archive_path / source_path.name).replace(source_path)
+                except OSError as rollback_error:
+                    rollback_failures.append(str(rollback_error))
+            if not rollback_failures:
+                try:
+                    archive_path.rmdir()
+                except OSError as rollback_error:
+                    rollback_failures.append(str(rollback_error))
+            detail = (
+                f" Could not restore all files: {'; '.join(rollback_failures)}."
+                if rollback_failures else ""
+            )
+            raise ProcessingError(f"Could not save article history: {error}.{detail}") from error
     completed_briefing = Briefing(
         created_at=briefing.created_at,
         model=briefing.model,
