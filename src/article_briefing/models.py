@@ -23,6 +23,7 @@ class ArticleSummary:
     read_recommendation: str
     input_note: str
     summarization_duration_seconds: float = 0.0
+    relevance_score: int | None = None
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
@@ -64,22 +65,9 @@ class FailureReport:
 
 
 @dataclass(frozen=True)
-class BriefingOverview:
-    overview: str
-    major_themes: list[str]
-    watch_for: str
-    summarization_duration_seconds: float = 0.0
-    error: str | None = None
-
-    def as_dict(self) -> dict[str, object]:
-        return asdict(self)
-
-
-@dataclass(frozen=True)
 class Briefing:
     created_at: str
     model: str
-    overview: BriefingOverview
     articles: list[ArticleSummary]
     skipped_files: list[str]
     generation_duration_seconds: float
@@ -92,3 +80,7 @@ class Briefing:
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)
+
+
+def format_relevance_score(score: int | None) -> str:
+    return f"{score}/10" if score is not None else "unavailable"

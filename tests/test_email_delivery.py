@@ -9,7 +9,6 @@ from article_briefing.models import (
     ArticleSummary,
     ArticleNotSelected,
     Briefing,
-    BriefingOverview,
     FailureReport,
     RelevanceFailure,
 )
@@ -59,15 +58,15 @@ class SmtpBriefingSenderTests(unittest.TestCase):
         body = render_plain_text(make_briefing())
 
         self.assertIn("Briefing generation time: 0 minutes 12.5 seconds", body)
-        self.assertIn("Overview summarization time: 0 minutes 1.5 seconds", body)
+        self.assertNotIn("OVERVIEW", body)
         self.assertIn("Summarization time: 0 minutes 3.2 seconds", body)
+        self.assertIn("Relevance score: 8/10", body)
 
     def test_plain_text_lists_articles_not_included(self) -> None:
         briefing = make_briefing()
         briefing = Briefing(
             created_at=briefing.created_at,
             model=briefing.model,
-            overview=briefing.overview,
             articles=briefing.articles,
             skipped_files=["failed.txt could not be summarized after 2 attempts."],
             generation_duration_seconds=briefing.generation_duration_seconds,
@@ -78,33 +77,11 @@ class SmtpBriefingSenderTests(unittest.TestCase):
         self.assertIn("ARTICLES NOT INCLUDED", body)
         self.assertIn("failed.txt could not be summarized after 2 attempts.", body)
 
-    def test_plain_text_reports_briefing_overview_error(self) -> None:
-        briefing = make_briefing()
-        briefing = Briefing(
-            created_at=briefing.created_at,
-            model=briefing.model,
-            overview=BriefingOverview(
-                overview="The combined briefing could not be created.",
-                major_themes=[],
-                watch_for="Review the individual article summaries below.",
-                error="Ollama response was invalid.",
-            ),
-            articles=briefing.articles,
-            skipped_files=[],
-            generation_duration_seconds=briefing.generation_duration_seconds,
-        )
-
-        body = render_plain_text(briefing)
-
-        self.assertIn("BRIEFING OVERVIEW ERROR", body)
-        self.assertIn("Ollama response was invalid.", body)
-
     def test_plain_text_includes_counts_and_all_invalid_relevance_outputs(self) -> None:
         briefing = make_briefing()
         briefing = Briefing(
             created_at=briefing.created_at,
             model=briefing.model,
-            overview=briefing.overview,
             articles=briefing.articles,
             skipped_files=[],
             generation_duration_seconds=briefing.generation_duration_seconds,
@@ -185,17 +162,11 @@ def make_briefing() -> Briefing:
         read_recommendation="Read the original article.",
         input_note="The summary is based on the supplied article text.",
         summarization_duration_seconds=3.2,
-    )
-    overview = BriefingOverview(
-        overview="A concise overview.",
-        major_themes=["Theme one.", "Theme two."],
-        watch_for="Watch for follow-up.",
-        summarization_duration_seconds=1.5,
+        relevance_score=8,
     )
     return Briefing(
         created_at="2026-10-26_180000-0400",
         model="test-model",
-        overview=overview,
         articles=[article],
         skipped_files=[],
         generation_duration_seconds=12.5,

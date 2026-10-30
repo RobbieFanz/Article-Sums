@@ -1,8 +1,8 @@
 # Article Briefing
 
-This first project slice reads article text files from a landing folder, uses a
-locally hosted Ollama model to create one summary per article plus a briefing
-overview, then archives the processed article files. It does not send email yet.
+This project reads article text files from a landing folder, uses a locally
+hosted Ollama model to summarize and score relevant articles, then archives the
+processed files. It can optionally email the briefing.
 
 ## Setup
 
@@ -121,21 +121,21 @@ or redirected logs. Request contents and SMTP credentials are not logged.
 
 On success, the command:
 
-1. creates one structured Ollama summary per landing file;
+1. filters the articles for relevance and creates a structured summary and
+   1–10 relevance score for each selected article;
 2. writes each individual article summary to
    `data/briefings/<timestamp>/article-summaries/<article-file-name>.md`;
-3. creates a short briefing overview from those item summaries, selecting only
-   the 2–3 most important cross-article developments;
-4. writes JSON and Markdown briefing files in
+3. sorts summaries by score, highest first, and writes JSON and Markdown briefing files in
    `data/briefings/<timestamp>/`; and
-5. moves the original `.txt` files to `data/archive/<timestamp>/`.
+4. moves the original `.txt` files to `data/archive/<timestamp>/`.
 
-`briefing.md` contains only the short combined briefing. Open the individual
-files in `article-summaries/` to review each article's complete summary, key
-points, relevance, and read recommendation.
+`briefing.md` lists the scored articles in order and links to the individual
+files in `article-summaries/`, which contain each complete summary, key points,
+score, and read recommendation. The email contains the full summaries in the
+same order. `briefing.json` contains the ordered articles and their scores.
 
 The briefing output includes the overall generation time, total process time,
-overview summarization time, and an individual Ollama duration for every
+and an individual Ollama duration for every
 article summary. When email is enabled, it also records SMTP delivery time.
 
 If Ollama returns an invalid individual article summary, the program retries
@@ -143,9 +143,13 @@ that article once. If the second attempt also fails, it continues with the
 remaining articles, leaves the failed source file in `data/landing/`, and lists
 the failure under “Articles not included” in the saved briefing and email.
 
-The combined briefing overview is also retried once. If both attempts fail, the
-email and saved briefing state the overview error and still include every valid
-individual article summary.
+The model assigns a whole-number relevance score from 1 to 10 during its final
+summary request, using the configured editorial criteria and the article's
+significance. Scores are approximate priorities, not a basis for excluding
+articles. If the score is missing or invalid, the summary is retained, a warning
+is logged, and the score is shown as unavailable. Unscored articles sort after
+scored ones; ties retain the original landing-file order. No overview request is
+made.
 
 ### Long articles
 
@@ -185,7 +189,7 @@ failures and malformed landing files also appear there with the available
 details and failure reason. Invalid relevance output is retried up to three
 times. If all three attempts are invalid, the article is summarized and placed
 in a clearly marked section at the bottom of the email and saved briefing,
-outside the combined briefing overview. That section includes all three invalid
+outside the main ranked article list. That section includes all three invalid
 model outputs for review.
 
 The top of every email and saved briefing reports the number of articles
@@ -240,8 +244,8 @@ SMTP_ENABLED=true
 
 Use an app password when your provider requires one; do not use or commit a
 personal account password. When SMTP is enabled, the generated briefing email
-contains the short overview followed by the individual article summaries and
-their timings. Source files move from `data/landing/` to `data/archive/` only
+contains the ranked individual article summaries, scores, and their timings.
+Source files move from `data/landing/` to `data/archive/` only
 after SMTP delivery succeeds. If delivery fails, the files remain in the
 landing folder for a later retry.
 
@@ -251,5 +255,5 @@ rejections and handled per-article failures), and the file being processed, if
 any. A failure outside article processing is reported as such. If notification
 delivery also fails, the original error and the notification error are reported
 on stderr. No failure email can be sent if SMTP is disabled or its configuration
-cannot be loaded. Handled article and overview errors remain in the normal
+cannot be loaded. Handled article errors remain in the normal
 briefing rather than triggering a separate failure email.

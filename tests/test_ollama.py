@@ -36,6 +36,7 @@ class OllamaResponseTests(unittest.TestCase):
             "key_points": ["One point."],
             "why_it_matters": "It matters.",
             "read_recommendation": "Read it.",
+            "relevance_score": 9,
         }
         responses = [
             ({"summary": value}, "") for value in ("1", "2", "3")
@@ -48,7 +49,10 @@ class OllamaResponseTests(unittest.TestCase):
         for chunk, prompt in zip(("abcdefghij", "ABCDEFGHIJ", "12345"), prompts):
             self.assertIn(chunk, prompt)
         self.assertIn("1\n\n2\n\n3", prompts[-1])
+        self.assertIn('"relevance_score"', prompts[-1])
+        self.assertNotIn('"relevance_score"', prompts[0])
         self.assertEqual(result.summary, "Whole article.")
+        self.assertEqual(result.relevance_score, 9)
         self.assertIn("summarized in chunks", result.input_note)
 
     def test_short_article_and_disabled_chunking_use_one_request(self) -> None:
@@ -57,6 +61,7 @@ class OllamaResponseTests(unittest.TestCase):
             "key_points": ["One point."],
             "why_it_matters": "It matters.",
             "read_recommendation": "Read it.",
+            "relevance_score": 7,
         }
         for enabled, text in ((True, "short"), (False, "x" * 25)):
             with self.subTest(enabled=enabled):
@@ -66,6 +71,42 @@ class OllamaResponseTests(unittest.TestCase):
                 request.assert_called_once()
                 self.assertIn(text, request.call_args.kwargs["user_prompt"])
                 self.assertNotIn("summarized in chunks", summary.input_note)
+                self.assertEqual(summary.relevance_score, 7)
+
+    def test_relevance_score_accepts_integer_endpoints(self) -> None:
+        final = {
+            "summary": "Whole article.",
+            "key_points": ["One point."],
+            "why_it_matters": "It matters.",
+            "read_recommendation": "Read it.",
+        }
+        client = make_client()
+        for score in (1, 10):
+            with self.subTest(score=score):
+                with patch.object(client, "_request_json", return_value=({**final, "relevance_score": score}, "")) as request:
+                    summary = client.summarize_article(make_article())
+                self.assertEqual(summary.relevance_score, score)
+                prompt = request.call_args.kwargs["user_prompt"]
+                self.assertIn("1 to 10", prompt)
+                self.assertIn(client._settings.relevance_criteria, prompt)
+
+    def test_invalid_or_missing_score_preserves_summary_and_logs_warning(self) -> None:
+        final = {
+            "summary": "Whole article.",
+            "key_points": ["One point."],
+            "why_it_matters": "It matters.",
+            "read_recommendation": "Read it.",
+        }
+        client = make_client()
+        for score in (None, 0, 11, True, 4.5, "8", "missing"):
+            with self.subTest(score=score):
+                response = final if score == "missing" else {**final, "relevance_score": score}
+                with patch.object(client, "_request_json", return_value=(response, "")):
+                    with self.assertLogs("article_briefing.ollama", level="WARNING") as logs:
+                        summary = client.summarize_article(make_article())
+                self.assertIsNone(summary.relevance_score)
+                self.assertEqual(summary.summary, "Whole article.")
+                self.assertIn("score unavailable", "\n".join(logs.output))
 
     def test_large_intermediate_summaries_are_reduced_before_final_request(self) -> None:
         client = make_client(chunked=True, chunk_size=15)
@@ -73,6 +114,7 @@ class OllamaResponseTests(unittest.TestCase):
             "summary": "Combined.",
             "why_it_matters": "It matters.",
             "read_recommendation": "Read it.",
+            "relevance_score": 5,
         }
         responses = [
             ({"summary": value}, "") for value in ("aaaaaa", "bbbbbb", "cccccc", "merged")
@@ -107,6 +149,7 @@ class OllamaResponseTests(unittest.TestCase):
             "key_points": ["A point"],
             "why_it_matters": "It matters.",
             "read_recommendation": "Read it.",
+            "relevance_score": 5,
         })
         response.read.side_effect = [
             json.dumps({"message": {"content": invalid}, "done_reason": "stop"}).encode(),

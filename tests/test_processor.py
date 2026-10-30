@@ -13,7 +13,6 @@ from article_briefing.models import (
     Article,
     ArticleSummary,
     Briefing,
-    BriefingOverview,
     FailureReport,
     RelevanceDecision,
 )
@@ -40,14 +39,6 @@ class FakeSummarizer:
             read_recommendation="Read for more detail.",
             input_note="The summary is based on the supplied article text.",
         )
-
-    def summarize_briefing(self, summaries: list[ArticleSummary]) -> BriefingOverview:
-        return BriefingOverview(
-            overview=f"{len(summaries)} article was summarized.",
-            major_themes=["A major theme.", "A second theme."],
-            watch_for="Watch for follow-up coverage.",
-        )
-
 
 class FakeSender:
     def __init__(self, source_file: Path, duration_seconds: float = 0.25) -> None:
@@ -88,20 +79,6 @@ class RetrySummarizer(FakeSummarizer):
         return super().summarize_article(article)
 
 
-class OverviewRetrySummarizer(FakeSummarizer):
-    def __init__(self, failures: int) -> None:
-        self.failures = failures
-        self.calls = 0
-
-    def summarize_briefing(self, summaries: list[ArticleSummary]) -> BriefingOverview:
-        self.calls += 1
-        if self.calls <= self.failures:
-            raise OllamaError(
-                "Ollama response field 'overview' must be a non-empty string."
-            )
-        return super().summarize_briefing(summaries)
-
-
 class RelevanceRetrySummarizer(FakeSummarizer):
     def __init__(self, invalid_response_count: int, include: bool = True) -> None:
         self.invalid_response_count = invalid_response_count
@@ -128,6 +105,48 @@ class RelevanceRetrySummarizer(FakeSummarizer):
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_articles_are_sorted_by_score_in_all_outputs(self) -> None:
+        class ScoredSummarizer(FakeSummarizer):
+            def summarize_article(self, article: Article) -> ArticleSummary:
+                scores = {"a-low.txt": 1, "b-high.txt": 10, "c-unknown.txt": None, "d-high.txt": 10}
+                return replace(
+                    super().summarize_article(article), relevance_score=scores[article.source_file]
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            settings = make_settings(Path(directory))
+            settings.landing_dir.mkdir(parents=True)
+            for name in ("a-low.txt", "b-high.txt", "c-unknown.txt", "d-high.txt"):
+                (settings.landing_dir / name).write_text("Article text", encoding="utf-8")
+            sender = FakeSender(settings.landing_dir / "a-low.txt")
+            result = process_landing_folder(settings, ScoredSummarizer(), sender=sender)
+
+            assert result.briefing_path is not None
+            payload = json.loads((result.briefing_path / "briefing.json").read_text())
+            self.assertNotIn("overview", payload)
+            self.assertEqual(
+                [item["source_file"] for item in payload["articles"]],
+                ["b-high.txt", "d-high.txt", "a-low.txt", "c-unknown.txt"],
+            )
+            self.assertEqual(
+                [item["relevance_score"] for item in payload["articles"]],
+                [10, 10, 1, None],
+            )
+            markdown = (result.briefing_path / "briefing.md").read_text()
+            self.assertIn("Relevance: unavailable", markdown)
+            self.assertIn("Relevance: 10/10", markdown)
+            self.assertNotIn("Overview", markdown)
+            self.assertIn(
+                "**Relevance score:** 10/10",
+                (result.briefing_path / "article-summaries" / "b-high.md").read_text(),
+            )
+            self.assertIsInstance(sender.briefing, Briefing)
+            assert isinstance(sender.briefing, Briefing)
+            for body in (markdown, render_plain_text(sender.briefing), render_html(sender.briefing)):
+                positions = [body.index(title) for title in ("b high", "d high", "a low", "c unknown")]
+                self.assertEqual(positions, sorted(positions))
+                self.assertNotIn("Overview", body)
+
     def test_chunking_loads_full_article_while_disabled_mode_retains_cap(self) -> None:
         class CaptureSummarizer(FakeSummarizer):
             def __init__(self) -> None:
@@ -246,10 +265,8 @@ class ProcessorTests(unittest.TestCase):
             self.assertIsNone(sender.failures[0].current_article)
             self.assertTrue(source.exists())
 
-    def test_mixed_articles_keep_rejected_out_of_overview_but_in_email(self) -> None:
+    def test_mixed_articles_keep_rejected_out_of_summaries_but_in_email(self) -> None:
         class MixedSummarizer(FakeSummarizer):
-            overview_titles: list[str]
-
             def __init__(self) -> None:
                 self.summarized_files: list[str] = []
 
@@ -263,10 +280,6 @@ class ProcessorTests(unittest.TestCase):
             def summarize_article(self, article: Article) -> ArticleSummary:
                 self.summarized_files.append(article.source_file)
                 return super().summarize_article(article)
-
-            def summarize_briefing(self, summaries: list[ArticleSummary]) -> BriefingOverview:
-                self.overview_titles = [summary.title for summary in summaries]
-                return super().summarize_briefing(summaries)
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -283,7 +296,6 @@ class ProcessorTests(unittest.TestCase):
 
             self.assertEqual(result.included_article_count, 1)
             self.assertEqual(result.not_included_article_count, 1)
-            self.assertEqual(summarizer.overview_titles, ["accepted"])
             self.assertEqual(summarizer.summarized_files, ["accepted.txt"])
             self.assertFalse(accepted.exists())
             self.assertFalse(rejected.exists())
@@ -330,7 +342,7 @@ class ProcessorTests(unittest.TestCase):
             self.assertEqual(briefing["articles"][0]["url"], "https://example.com/model-release")
             self.assertTrue((briefing_path / "article-summaries" / "model-release.md").exists())
             briefing_markdown = (briefing_path / "briefing.md").read_text()
-            self.assertNotIn("## Articles", briefing_markdown)
+            self.assertIn("## Article summaries", briefing_markdown)
             self.assertIn("article-summaries/", briefing_markdown)
             self.assertGreater(briefing["generation_duration_seconds"], 0)
             self.assertGreater(briefing["total_duration_seconds"], 0)
@@ -510,53 +522,6 @@ class ProcessorTests(unittest.TestCase):
             self.assertEqual(
                 briefing["articles_not_selected"][0]["url"],
                 "https://example.com/failed",
-            )
-
-    def test_retries_briefing_overview_once_before_succeeding(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            settings = make_settings(root)
-            settings.landing_dir.mkdir(parents=True)
-            source_file = settings.landing_dir / "overview-retry.txt"
-            source_file.write_text(
-                "https://example.com/overview-retry\n\nArticle text.",
-                encoding="utf-8",
-            )
-            summarizer = OverviewRetrySummarizer(failures=1)
-
-            result = process_landing_folder(settings, summarizer)
-
-            assert result.briefing_path is not None
-            self.assertEqual(summarizer.calls, 2)
-            briefing = json.loads((result.briefing_path / "briefing.json").read_text())
-            self.assertIsNone(briefing["overview"]["error"])
-
-    def test_sends_valid_articles_when_briefing_overview_fails_twice(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary_directory:
-            root = Path(temporary_directory)
-            settings = make_settings(root)
-            settings.landing_dir.mkdir(parents=True)
-            source_file = settings.landing_dir / "overview-failure.txt"
-            source_file.write_text(
-                "https://example.com/overview-failure\n\nArticle text.",
-                encoding="utf-8",
-            )
-            summarizer = OverviewRetrySummarizer(failures=2)
-
-            result = process_landing_folder(settings, summarizer)
-
-            assert result.briefing_path is not None
-            self.assertEqual(summarizer.calls, 2)
-            self.assertFalse(source_file.exists())
-            briefing = json.loads((result.briefing_path / "briefing.json").read_text())
-            self.assertEqual(
-                briefing["overview"]["error"],
-                "Ollama response field 'overview' must be a non-empty string.",
-            )
-            briefing_markdown = (result.briefing_path / "briefing.md").read_text()
-            self.assertIn("## Briefing overview error", briefing_markdown)
-            self.assertTrue(
-                (result.briefing_path / "article-summaries" / "overview-failure.md").exists()
             )
 
     def test_archives_validly_rejected_article_without_summarizing_it(self) -> None:

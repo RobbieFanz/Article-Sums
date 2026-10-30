@@ -11,7 +11,6 @@ from article_briefing.config import Settings
 from article_briefing.models import (
     Article,
     ArticleSummary,
-    BriefingOverview,
     RelevanceDecision,
 )
 
@@ -74,7 +73,14 @@ class OllamaClient:
                 "Summarize this article for a private briefing. Return this exact JSON "
                 'shape: {"summary": "2-3 neutral sentences", "key_points": '
                 '["point 1", "point 2", "point 3"], "why_it_matters": "1 sentence", '
-                '"read_recommendation": "1 sentence"}. Include 2 to 4 key points.\n\n'
+                '"read_recommendation": "1 sentence", "relevance_score": 7}. '
+                "Include 2 to 4 key points. Give relevance_score as an integer from "
+                "1 to 10 based on the summary's relevance and significance for the "
+                "editorial criteria: 1 is minimally relevant, 5 is moderately relevant, "
+                "and 10 is exceptionally relevant and significant. Use the whole scale.\n\n"
+                "EDITORIAL CRITERIA START\n"
+                f"{self._settings.relevance_criteria}\n"
+                "EDITORIAL CRITERIA END\n\n"
                 f"ARTICLE TITLE: {article.title}\n"
                 f"ARTICLE URL: {article.url or 'Not provided'}\n"
                 f"INPUT NOTE: {input_note}\n"
@@ -93,6 +99,7 @@ class OllamaClient:
             read_recommendation=required_string(response, "read_recommendation"),
             input_note=input_note,
             summarization_duration_seconds=perf_counter() - started_at,
+            relevance_score=optional_relevance_score(response, article.source_file),
         )
 
     def _summarize_part(self, article: Article, content: str, label: str) -> str:
@@ -141,44 +148,6 @@ class OllamaClient:
                 for group in groups
             ]
         return "\n\n".join(summaries)
-
-    def summarize_briefing(self, summaries: list[ArticleSummary]) -> BriefingOverview:
-        started_at = perf_counter()
-        summary_payload = [
-            {
-                "title": summary.title,
-                "url": summary.url,
-                "summary": summary.summary,
-                "key_points": summary.key_points,
-                "why_it_matters": summary.why_it_matters,
-            }
-            for summary in summaries
-        ]
-        response, _ = self._request_json(
-            system_prompt=(
-                "You create a concise briefing overview from supplied article summaries. "
-                "Use only the supplied summaries. Do not merge unrelated stories, add "
-                "facts, make predictions, or give financial advice. Return valid JSON only."
-            ),
-            user_prompt=(
-                "Create a short executive briefing from these article summaries. Select "
-                "only the 2 or 3 most important developments across the set. Omit "
-                "lower-importance stories, even when they have their own article "
-                "summary. Return this exact JSON shape: "
-                '{"overview": "2-3 sentences", "major_themes": '
-                '["theme 1", "theme 2", "theme 3"], "watch_for": "1 sentence"}. '
-                "Include 2 to 3 major themes.\n\n"
-                "ARTICLE SUMMARIES START\n"
-                f"{json.dumps(summary_payload, ensure_ascii=False)}\n"
-                "ARTICLE SUMMARIES END"
-            ),
-        )
-        return BriefingOverview(
-            overview=required_string(response, "overview"),
-            major_themes=string_list(response, "major_themes", minimum=2, maximum=3),
-            watch_for=required_string(response, "watch_for"),
-            summarization_duration_seconds=perf_counter() - started_at,
-        )
 
     def assess_relevance(self, article: Article) -> RelevanceDecision:
         started_at = perf_counter()
@@ -342,17 +311,16 @@ def required_string(payload: dict[str, Any], field: str) -> str:
     return value.strip()
 
 
-def string_list(
-    payload: dict[str, Any], field: str, minimum: int, maximum: int
-) -> list[str]:
-    value = payload.get(field)
-    if not isinstance(value, list) or not minimum <= len(value) <= maximum:
-        raise OllamaError(
-            f"Ollama response field {field!r} must contain {minimum} to {maximum} items."
-        )
-    if not all(isinstance(item, str) and item.strip() for item in value):
-        raise OllamaError(f"Ollama response field {field!r} must contain non-empty strings.")
-    return [item.strip() for item in value]
+def optional_relevance_score(payload: dict[str, Any], source_file: str) -> int | None:
+    value = payload.get("relevance_score")
+    if isinstance(value, int) and not isinstance(value, bool) and 1 <= value <= 10:
+        return value
+    logger.warning(
+        "Ollama returned a missing or invalid relevance score for %s; "
+        "the summary will be kept with its score unavailable.",
+        source_file,
+    )
+    return None
 
 
 def key_points_or_fallback(payload: dict[str, Any]) -> list[str]:

@@ -16,10 +16,10 @@ from article_briefing.models import (
     ArticleNotSelected,
     ArticleSummary,
     Briefing,
-    BriefingOverview,
     FailureReport,
     RelevanceDecision,
     RelevanceFailure,
+    format_relevance_score,
 )
 from article_briefing.ollama import OllamaError, OllamaOutputError
 
@@ -45,8 +45,6 @@ class Summarizer(Protocol):
     def assess_relevance(self, article: Article) -> RelevanceDecision: ...
 
     def summarize_article(self, article: Article) -> ArticleSummary: ...
-
-    def summarize_briefing(self, summaries: list[ArticleSummary]) -> BriefingOverview: ...
 
 
 class BriefingSender(Protocol):
@@ -191,7 +189,7 @@ def _process_landing_folder(
             relevance_failures.append(
                 RelevanceFailure(summary=summary, invalid_outputs=invalid_outputs)
             )
-            logger.info("Saved fallback summary for %s outside the overview.", source_file.name)
+            logger.info("Saved fallback summary for %s outside the main briefing.", source_file.name)
             archived_files.append(source_file)
             not_included_article_count += 1
             progress.processed_article_count += 1
@@ -238,16 +236,7 @@ def _process_landing_folder(
         progress.processed_article_count += 1
         progress.current_article = None
 
-    logger.info("Preparing overview from %d selected article(s).", len(summaries))
-    overview = (
-        summarize_briefing_with_retry(summarizer, summaries)
-        if summaries
-        else BriefingOverview(
-            overview="No article summaries are available for the combined briefing.",
-            major_themes=[],
-            watch_for="Review a later collection cycle for new relevant stories.",
-        )
-    )
+    summaries.sort(key=lambda summary: -(summary.relevance_score or 0))
 
     timestamp = (now or datetime.now().astimezone()).strftime("%Y-%m-%d_%H%M%S%z")
     briefing_path = settings.briefing_dir / timestamp
@@ -261,7 +250,6 @@ def _process_landing_folder(
     briefing = Briefing(
         created_at=timestamp,
         model=settings.ollama_model,
-        overview=overview,
         articles=summaries,
         skipped_files=warnings,
         generation_duration_seconds=generation_duration_seconds,
@@ -286,7 +274,6 @@ def _process_landing_folder(
     completed_briefing = Briefing(
         created_at=briefing.created_at,
         model=briefing.model,
-        overview=briefing.overview,
         articles=briefing.articles,
         skipped_files=briefing.skipped_files,
         generation_duration_seconds=briefing.generation_duration_seconds,
@@ -367,28 +354,6 @@ def assess_relevance_with_retry(
             logger.info("Relevance attempt %d/3 failed for %s: %s", attempt, article.source_file, error)
             invalid_outputs.append(error.raw_output)
     return None, invalid_outputs
-
-
-def summarize_briefing_with_retry(
-    summarizer: Summarizer, summaries: list[ArticleSummary]
-) -> BriefingOverview:
-    last_error: OllamaError | None = None
-    for attempt in range(1, 3):
-        logger.info("Generating briefing overview (attempt %d/2).", attempt)
-        try:
-            overview = summarizer.summarize_briefing(summaries)
-            logger.info("Briefing overview succeeded (attempt %d/2).", attempt)
-            return overview
-        except OllamaError as error:
-            logger.info("Briefing overview attempt %d/2 failed: %s", attempt, error)
-            last_error = error
-    assert last_error is not None
-    return BriefingOverview(
-        overview="The combined briefing could not be created.",
-        major_themes=[],
-        watch_for="Review the individual article summaries below.",
-        error=str(last_error),
-    )
 
 
 def optional_url(lines: list[str], first_content_line: int, path: Path) -> tuple[str | None, int]:
@@ -473,9 +438,6 @@ def write_article_summaries(
 
 
 def render_markdown(payload: dict[str, object]) -> str:
-    overview = payload["overview"]
-    assert isinstance(overview, dict)
-
     lines = [
         "# Briefing",
         "",
@@ -496,39 +458,22 @@ def render_markdown(payload: dict[str, object]) -> str:
             if payload["email_delivery_duration_seconds"] is not None
             else ""
         ),
-        "",
-        "## Overview",
-        "",
-        str(overview["overview"]),
     ]
-    overview_error = overview["error"]
-    assert overview_error is None or isinstance(overview_error, str)
-    if overview_error:
-        lines.extend(
-            [
-                "",
-                "## Briefing overview error",
-                "",
-                f"The combined briefing could not be created: {overview_error}",
-            ]
-        )
+    articles = payload["articles"]
+    assert isinstance(articles, list)
+    lines.extend(["", "## Article summaries", ""])
+    if articles:
+        for article in articles:
+            assert isinstance(article, dict)
+            score = article["relevance_score"]
+            assert score is None or isinstance(score, int)
+            filename = f"{Path(article['source_file']).stem}.md"
+            lines.append(
+                f"- [{article['title']}](<article-summaries/{filename}>) "
+                f"— Relevance: {format_relevance_score(score)}"
+            )
     else:
-        lines.extend(
-            [
-                "",
-                "### Major themes",
-                "",
-                *[f"- {theme}" for theme in overview["major_themes"]],
-                "",
-                f"**Watch for:** {overview['watch_for']}",
-            ]
-        )
-    lines.extend(
-        [
-            "",
-            "Individual article summaries are in [`article-summaries/`](article-summaries/).",
-        ]
-    )
+        lines.append("No article summaries are available.")
     articles_not_selected = payload["articles_not_selected"]
     assert isinstance(articles_not_selected, list)
     if articles_not_selected:
@@ -562,7 +507,7 @@ def render_markdown(payload: dict[str, object]) -> str:
                 "",
                 "## Relevance triage failures",
                 "",
-                "These articles are excluded from the combined briefing because the "
+                "These articles are excluded from the main briefing because the "
                 "model did not return valid relevance output after 3 attempts.",
             ]
         )
@@ -576,6 +521,8 @@ def render_markdown(payload: dict[str, object]) -> str:
                 [
                     "",
                     f"### {summary['title']}",
+                    "",
+                    f"**Relevance score:** {format_relevance_score(summary['relevance_score'])}",
                     "",
                     str(summary["summary"]),
                     "",
@@ -604,6 +551,8 @@ def render_article_summary(summary: ArticleSummary) -> str:
         f"# {title}",
         "",
         original_article,
+        "",
+        f"**Relevance score:** {format_relevance_score(summary.relevance_score)}",
         "",
         "## Summary",
         "",
