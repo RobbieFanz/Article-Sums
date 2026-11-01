@@ -119,6 +119,8 @@ def _process_landing_folder(
     history = ArticleHistory(settings.history_path or settings.project_root / DEFAULT_HISTORY_PATH)
     articles: list[Article] = []
     processed_files: list[Path] = []
+    failed_files: list[Path] = []
+    failed_urls: list[tuple[str, bool | None, str]] = []
     warnings: list[str] = []
     articles_not_selected: list[ArticleNotSelected] = []
     for path in landing_files:
@@ -132,11 +134,15 @@ def _process_landing_folder(
         except ProcessingError as error:
             logger.info("Skipping invalid article %s: %s", path.name, error)
             warnings.append(str(error))
+            failed_files.append(path)
+            url = history.url_for_landing_file(path) or recover_article_url(path)
+            if url:
+                failed_urls.append((url, None, "Invalid landing file"))
             articles_not_selected.append(
                 ArticleNotSelected(
                     source_file=path.name,
                     title=path.stem.replace("_", " ").replace("-", " ").strip(),
-                    url=None,
+                    url=url,
                     reason=str(error),
                 )
             )
@@ -176,6 +182,9 @@ def _process_landing_folder(
                 warning = f"{source_file.name} could not be summarized after 2 attempts: {error}"
                 warnings.append(warning)
                 logger.info("%s", warning)
+                failed_files.append(source_file)
+                if article.url:
+                    failed_urls.append((article.url, None, "Relevance and summary attempts failed"))
                 articles_not_selected.append(
                     ArticleNotSelected(
                         source_file=article.source_file,
@@ -228,6 +237,9 @@ def _process_landing_folder(
             warning = f"{source_file.name} could not be summarized after 2 attempts: {error}"
             warnings.append(warning)
             logger.info("%s", warning)
+            failed_files.append(source_file)
+            if article.url:
+                failed_urls.append((article.url, True, "Summary failed after 2 attempts"))
             articles_not_selected.append(
                 ArticleNotSelected(
                     source_file=article.source_file,
@@ -252,7 +264,8 @@ def _process_landing_folder(
     timestamp = (now or datetime.now().astimezone()).strftime("%Y-%m-%d_%H%M%S%z")
     briefing_path = settings.briefing_dir / timestamp
     archive_path = settings.archive_dir / timestamp
-    if briefing_path.exists() or archive_path.exists():
+    failed_path = settings.archive_dir / "failed" / timestamp
+    if briefing_path.exists() or archive_path.exists() or (failed_files and failed_path.exists()):
         raise ProcessingError(
             f"Briefing timestamp collision at {timestamp}. Rerun the command."
         )
@@ -279,30 +292,9 @@ def _process_landing_folder(
     else:
         email_delivery_duration_seconds = None
         logger.info("Skipping email delivery because SMTP is disabled.")
-    if archived_files:
-        logger.info("Archiving %d article(s) to %s.", len(archived_files), archive_path)
-        archive_files(archived_files, archive_path, progress)
-        try:
-            history.record_processed(processed_urls)
-        except HistoryError as error:
-            rollback_failures: list[str] = []
-            for source_path in reversed(archived_files):
-                try:
-                    if source_path.exists():
-                        raise OSError(f"Cannot restore {source_path}: file already exists")
-                    (archive_path / source_path.name).replace(source_path)
-                except OSError as rollback_error:
-                    rollback_failures.append(str(rollback_error))
-            if not rollback_failures:
-                try:
-                    archive_path.rmdir()
-                except OSError as rollback_error:
-                    rollback_failures.append(str(rollback_error))
-            detail = (
-                f" Could not restore all files: {'; '.join(rollback_failures)}."
-                if rollback_failures else ""
-            )
-            raise ProcessingError(f"Could not save article history: {error}.{detail}") from error
+    moved_files, created_directories = archive_files(
+        [(archived_files, archive_path), (failed_files, failed_path)], progress
+    )
     completed_briefing = Briefing(
         created_at=briefing.created_at,
         model=briefing.model,
@@ -316,8 +308,19 @@ def _process_landing_folder(
         total_duration_seconds=perf_counter() - started_at,
         email_delivery_duration_seconds=email_delivery_duration_seconds,
     )
-    logger.info("Updating briefing output with completion timings.")
-    write_briefing(briefing_path, completed_briefing)
+    try:
+        logger.info("Updating briefing output with completion timings.")
+        write_briefing(briefing_path, completed_briefing)
+        history.record_outcomes(processed_urls, failed_urls)
+    except Exception as error:
+        failures = restore_archived_files(moved_files, created_directories)
+        if failures:
+            raise ProcessingError(
+                f"Batch completion failed: {error}. Could not restore all files: {'; '.join(failures)}."
+            ) from error
+        if isinstance(error, HistoryError):
+            raise ProcessingError(f"Could not save article history: {error}") from error
+        raise
     logger.info("Briefing processing completed.")
     return ProcessingResult(
         briefing_path=briefing_path,
@@ -355,6 +358,20 @@ def load_article(path: Path, maximum_characters: int | None) -> Article:
         text=text[:maximum_characters],
         was_truncated=was_truncated,
     )
+
+
+def recover_article_url(path: Path) -> str | None:
+    try:
+        with path.open("rb") as source:
+            raw_line = source.readline().removeprefix(b"\xef\xbb\xbf")
+            while raw_line and not raw_line.strip():
+                raw_line = source.readline()
+            first_line = raw_line.decode("utf-8").strip()
+    except UnicodeDecodeError:
+        return None
+    if first_line.lower().startswith("url:"):
+        first_line = first_line[4:].strip()
+    return first_line if is_complete_url(first_line) else None
 
 
 def summarize_article_with_retry(summarizer: Summarizer, article: Article) -> ArticleSummary:
@@ -403,7 +420,10 @@ def optional_url(lines: list[str], first_content_line: int, path: Path) -> tuple
 
 
 def is_complete_url(value: str) -> bool:
-    parsed_url = urlparse(value)
+    try:
+        parsed_url = urlparse(value)
+    except ValueError:
+        return False
     return parsed_url.scheme in {"http", "https"} and bool(parsed_url.netloc)
 
 
@@ -428,30 +448,49 @@ def write_briefing(briefing_path: Path, briefing: Briefing) -> None:
 
 
 def archive_files(
-    landing_files: list[Path], archive_path: Path, progress: ProcessingProgress
-) -> None:
-    archive_path.parent.mkdir(parents=True, exist_ok=True)
+    groups: list[tuple[list[Path], Path]], progress: ProcessingProgress
+) -> tuple[list[tuple[Path, Path]], list[Path]]:
     moved_files: list[tuple[Path, Path]] = []
+    created_directories: list[Path] = []
     try:
-        archive_path.mkdir()
-        for source_path in landing_files:
-            progress.current_article = source_path.name
-            logger.info("Archiving article: %s", source_path.name)
-            destination_path = archive_path / source_path.name
-            source_path.replace(destination_path)
-            moved_files.append((source_path, destination_path))
+        for landing_files, archive_path in groups:
+            if not landing_files:
+                continue
+            archive_path.parent.mkdir(parents=True, exist_ok=True)
+            archive_path.mkdir()
+            created_directories.append(archive_path)
+            for source_path in landing_files:
+                progress.current_article = source_path.name
+                logger.info("Archiving article: %s", source_path.name)
+                destination_path = archive_path / source_path.name
+                source_path.replace(destination_path)
+                moved_files.append((source_path, destination_path))
         progress.current_article = None
     except OSError as error:
-        rollback_failures = []
-        for source_path, destination_path in reversed(moved_files):
-            try:
-                destination_path.replace(source_path)
-            except OSError as rollback_error:
-                rollback_failures.append(str(rollback_error))
-        if archive_path.exists() and not any(archive_path.iterdir()):
-            archive_path.rmdir()
-        detail = f" Could not restore all files: {'; '.join(rollback_failures)}." if rollback_failures else ""
+        failures = restore_archived_files(moved_files, created_directories)
+        detail = f" Could not restore all files: {'; '.join(failures)}." if failures else ""
         raise ProcessingError(f"Could not archive landing files: {error}.{detail}") from error
+    return moved_files, created_directories
+
+
+def restore_archived_files(
+    moved_files: list[tuple[Path, Path]], created_directories: list[Path]
+) -> list[str]:
+    failures: list[str] = []
+    for source_path, destination_path in reversed(moved_files):
+        try:
+            if source_path.exists():
+                raise OSError(f"Cannot restore {source_path}: file already exists")
+            destination_path.replace(source_path)
+        except OSError as error:
+            failures.append(str(error))
+    for directory in reversed(created_directories):
+        try:
+            if not any(directory.iterdir()):
+                directory.rmdir()
+        except OSError as error:
+            failures.append(str(error))
+    return failures
 
 
 def write_text(path: Path, content: str) -> None:

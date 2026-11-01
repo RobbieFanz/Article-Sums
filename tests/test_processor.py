@@ -393,7 +393,8 @@ class ProcessorTests(unittest.TestCase):
             )
 
             assert result.briefing_path is not None
-            self.assertTrue(invalid_file.exists())
+            self.assertFalse(invalid_file.exists())
+            self.assertEqual(len(list((settings.archive_dir / "failed").glob("*/invalid.txt"))), 1)
             self.assertFalse(valid_file.exists())
             self.assertEqual(
                 result.warnings,
@@ -511,7 +512,8 @@ class ProcessorTests(unittest.TestCase):
 
             assert result.briefing_path is not None
             self.assertEqual(summarizer.calls_by_file["failed.txt"], 2)
-            self.assertTrue(failed_file.exists())
+            self.assertFalse(failed_file.exists())
+            self.assertEqual(len(list((settings.archive_dir / "failed").glob("*/failed.txt"))), 1)
             self.assertFalse(valid_file.exists())
             self.assertEqual(len(result.warnings), 1)
             self.assertIn("failed.txt could not be summarized after 2 attempts", result.warnings[0])
@@ -569,7 +571,7 @@ class ProcessorTests(unittest.TestCase):
                 (result.briefing_path / "briefing.md").read_text(),
             )
 
-    def test_all_invalid_files_produce_a_report_without_archiving(self) -> None:
+    def test_all_invalid_files_produce_a_report_and_are_archived_as_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
             settings = make_settings(root)
@@ -581,8 +583,8 @@ class ProcessorTests(unittest.TestCase):
             result = process_landing_folder(settings, FakeSummarizer(), sender=sender)
 
             self.assertIsNotNone(result.briefing_path)
-            self.assertTrue(source_file.exists())
-            self.assertFalse(settings.archive_dir.exists())
+            self.assertFalse(source_file.exists())
+            self.assertEqual(len(list((settings.archive_dir / "failed").glob("*/empty.txt"))), 1)
             self.assertEqual(result.not_included_article_count, 1)
             self.assertIsInstance(sender.briefing, Briefing)
             assert isinstance(sender.briefing, Briefing)

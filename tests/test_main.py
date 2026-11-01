@@ -82,7 +82,8 @@ class MainFailureTests(unittest.TestCase):
                 self.assertIn('"done_reason": "stop"', result.stderr)
                 self.assertNotIn("Private article text.", result.stderr)
                 self.assertIn("Articles included: 0 | not included: 1", result.stdout)
-                self.assertTrue(article.exists())
+                self.assertFalse(article.exists())
+                self.assertEqual(len(list((root / "archive" / "failed").glob("*/test.txt"))), 1)
         finally:
             server.shutdown()
             server.server_close()

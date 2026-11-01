@@ -91,8 +91,8 @@ in the terminal. The collector does not bypass login pages, paywalls, CAPTCHAs,
 or bot protections.
 
 The collector checks the local article history before downloading. It skips
-links already processed and links with an existing landing file, including
-links supplied manually in landing files. It records both the submitted link
+links already processed, links marked as failed, and links with an existing
+landing file, including links supplied manually in landing files. It records both the submitted link
 and final redirected link when known. A previously unseen redirect can only be
 recognized after its page is requested. Matching uses the exact URL; different
 URL variants are not automatically normalized.
@@ -124,9 +124,9 @@ Article text begins here.
 It can span multiple lines.
 ```
 
-An invalid `URL:` header is reported as a warning and left in the landing
-folder for correction. Individual article summaries show “Original article:
-unavailable” when no URL is provided.
+An invalid `URL:` header is reported as a warning and moved to the failed
+archive after the batch completes. Individual article summaries show “Original
+article: unavailable” when no URL is provided.
 
 For example, a file named `new-model-release.txt` is displayed as “new model
 release” in the generated briefing.
@@ -151,7 +151,8 @@ On success, the command:
    `data/briefings/<timestamp>/article-summaries/<article-file-name>.md`;
 3. sorts summaries by score, highest first, and writes JSON and Markdown briefing files in
    `data/briefings/<timestamp>/`; and
-4. moves the original `.txt` files to `data/archive/<timestamp>/`.
+4. moves processed `.txt` files to `data/archive/<timestamp>/` and failed files
+   to `data/archive/failed/<timestamp>/`.
 
 `briefing.md` lists the scored articles in order and links to the individual
 files in `article-summaries/`, which contain each complete summary, key points,
@@ -164,8 +165,8 @@ article summary. When email is enabled, it also records SMTP delivery time.
 
 If Ollama returns an invalid individual article summary, the program retries
 that article once. If the second attempt also fails, it continues with the
-remaining articles, leaves the failed source file in `data/landing/`, and lists
-the failure under “Articles not included” in the saved briefing and email.
+remaining articles, records the failure under “Articles not included,” and,
+once the batch completes, moves the source file to the failed archive.
 
 The model assigns a whole-number relevance score from 1 to 10 during its final
 summary request, using the configured editorial criteria and the article's
@@ -192,8 +193,8 @@ context. Adjust `SUMMARY_CHUNK_CHARACTERS` for the allocated context and text;
 even the default does not guarantee that a request fits. Increase it for a
 larger context to reduce calls, or lower it for unusually token-dense text. Long articles
 require more calls and intermediate summaries can omit details. If a chunk or
-combine request fails, the whole article is retried once and remains in the
-landing folder if it still fails.
+combine request fails, the whole article is retried once and moved to the
+failed archive if it still fails and the batch completes.
 
 Set `CHUNKED_SUMMARIZATION=false` to restore the single-request path and its
 `MAX_ARTICLE_CHARACTERS` cap. If the variable is omitted, chunking is disabled.
@@ -221,16 +222,17 @@ included in the main briefing and not included, including malformed files and
 relevance-triage failures. The email can still list those not included.
 
 Malformed landing files do not stop valid files from being processed. The
-command prints a warning, includes the warning in `briefing.json`, and leaves
-each malformed file in `data/landing/` for correction. Successfully summarized
-and relevance-rejected files are archived after successful delivery (or after
-saving if email is disabled). Errors from Ollama or briefing-output creation
-can still stop the batch before archiving.
+command prints a warning, includes the warning in `briefing.json`, and archives
+each malformed file under `data/archive/failed/<timestamp>/` after the batch
+completes. Successfully summarized and relevance-rejected files are archived
+normally. Both groups are moved after successful delivery (or after saving if
+email is disabled). If a batch-level error prevents completion, source files
+remain in or are restored to the landing folder for retry.
 
 ## Article history
 
-The local SQLite database at `data/article-history.sqlite3` tracks collected
-and processed links, timestamps, and whether processed articles were relevant.
+The local SQLite database at `data/article-history.sqlite3` tracks collected,
+processed, and failed links, timestamps, and relevance when known.
 When relevance triage fails but a fallback summary succeeds, the relevance is
 unknown. No article text or summaries are stored in the database; archived
 files and briefings remain the main way to browse past work. Articles without
@@ -238,10 +240,14 @@ a valid link cannot be tracked by URL.
 
 History starts with new activity; existing archives are not imported. A pending
 link is eligible for collection again if its landing file is removed. Failed
-downloads are not recorded, and failed summaries remain in the landing folder
-for processing again. URL-bearing files supplied manually are recorded as
-pending when processing starts. Database errors are reported rather than silently
-disabling duplicate checks.
+downloads are not recorded. Links for archived failures are retained and skipped
+by the collector even if their failed archive files are deleted. To retry one,
+copy its file from the failed archive to the landing folder, correcting it first
+if needed; processing will try it again, and a successful retry updates its
+status. Malformed files without recoverable links are archived but cannot be
+tracked by URL. URL-bearing files supplied manually are recorded as pending when
+processing starts. Database errors are reported rather than silently disabling
+duplicate checks.
 
 Set `ARTICLE_HISTORY_PATH` to use another database location for both commands,
 or pass `--database` to the collector for a one-off override. Use the same
