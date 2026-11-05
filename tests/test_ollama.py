@@ -28,6 +28,12 @@ class OllamaResponseTests(unittest.TestCase):
         self.assertEqual("".join(chunks), text)
         self.assertTrue(all(len(chunk) <= 10 for chunk in chunks))
 
+    def test_capped_split_keeps_original_paragraph_boundaries(self) -> None:
+        text = "a" * 7 + "\n\n" + "b" * 18
+        chunks = split_article_text(text, 10)
+        self.assertEqual(chunks[0], "a" * 7 + "\n\n")
+        self.assertEqual(split_article_text(text, 10, 2), chunks[:2])
+
     def test_chunking_summarizes_all_chunks_then_combines_them(self) -> None:
         client = make_client(chunked=True, chunk_size=10)
         article = replace(make_article(), text="abcdefghijABCDEFGHIJ12345")
@@ -54,6 +60,57 @@ class OllamaResponseTests(unittest.TestCase):
         self.assertEqual(result.summary, "Whole article.")
         self.assertEqual(result.relevance_score, 9)
         self.assertIn("summarized in chunks", result.input_note)
+        self.assertFalse(result.chunk_limit_reached)
+
+    def test_chunk_limit_only_summarizes_first_chunks(self) -> None:
+        final = {
+            "summary": "Partial article.",
+            "why_it_matters": "It matters.",
+            "read_recommendation": "Read it.",
+            "relevance_score": 5,
+        }
+        for maximum, text, count, limited in (
+            (2, "abcdefghijABCDEFGHIJ12345", 2, True),
+            (2, "abcdefghijABCDEFGHIJ", 2, False),
+            (1, "abcdefghijABCDEFGHIJ", 1, True),
+            (0, "abcdefghijABCDEFGHIJ12345", 3, False),
+        ):
+            with self.subTest(maximum=maximum, text=text):
+                client = make_client(chunked=True, chunk_size=10, max_chunks=maximum)
+                responses = [({"summary": str(index)}, "") for index in range(count)]
+                responses.append((final, ""))
+                with patch.object(client, "_request_json", side_effect=responses) as request:
+                    summary = client.summarize_article(replace(make_article(), text=text))
+                self.assertEqual(request.call_count, count + 1)
+                prompts = [call.kwargs["user_prompt"] for call in request.call_args_list]
+                expected_chunks = split_article_text(text, 10)[:count]
+                for chunk, prompt in zip(expected_chunks, prompts, strict=False):
+                    self.assertIn(chunk, prompt)
+                self.assertIn("\n\n".join(str(index) for index in range(count)), prompts[-1])
+                self.assertEqual(summary.chunk_limit_reached, limited)
+                if limited:
+                    omitted = text[sum(len(chunk) for chunk in expected_chunks):]
+                    self.assertTrue(all(omitted not in prompt for prompt in prompts))
+                    self.assertIn("rest of the article was not", summary.input_note)
+
+    def test_relevance_does_not_read_past_chunk_limit(self) -> None:
+        article = replace(make_article(), text="abcdefghijABCDEFGHIJ12345")
+        for enabled, maximum, expected in (
+            (True, 1, "abcdefghij"),
+            (True, 0, article.text),
+            (False, 1, article.text),
+        ):
+            with self.subTest(enabled=enabled, maximum=maximum):
+                client = make_client(chunked=enabled, chunk_size=10, max_chunks=maximum)
+                with patch.object(client, "_request_json", return_value=(
+                    {"include": True, "reason": "Relevant."}, ""
+                )) as request:
+                    client.assess_relevance(article)
+                prompt = request.call_args.kwargs["user_prompt"]
+                self.assertIn(expected, prompt)
+                if enabled and maximum:
+                    self.assertNotIn("ABCDEFGHIJ", prompt)
+                    self.assertIn("first 10 characters", prompt)
 
     def test_short_article_and_disabled_chunking_use_one_request(self) -> None:
         final = {
@@ -65,12 +122,13 @@ class OllamaResponseTests(unittest.TestCase):
         }
         for enabled, text in ((True, "short"), (False, "x" * 25)):
             with self.subTest(enabled=enabled):
-                client = make_client(chunked=enabled, chunk_size=10)
+                client = make_client(chunked=enabled, chunk_size=10, max_chunks=1)
                 with patch.object(client, "_request_json", return_value=(final, "")) as request:
                     summary = client.summarize_article(replace(make_article(), text=text))
                 request.assert_called_once()
                 self.assertIn(text, request.call_args.kwargs["user_prompt"])
                 self.assertNotIn("summarized in chunks", summary.input_note)
+                self.assertFalse(summary.chunk_limit_reached)
                 self.assertEqual(summary.relevance_score, 7)
 
     def test_relevance_score_accepts_integer_endpoints(self) -> None:
@@ -241,7 +299,9 @@ class OllamaResponseTests(unittest.TestCase):
             client._request_json("System prompt", "User prompt")
 
 
-def make_client(*, chunked: bool = False, chunk_size: int = 100000) -> OllamaClient:
+def make_client(
+    *, chunked: bool = False, chunk_size: int = 100000, max_chunks: int = 10
+) -> OllamaClient:
     root = Path("/tmp/article-briefing-test")
     return OllamaClient(
         Settings(
@@ -255,6 +315,7 @@ def make_client(*, chunked: bool = False, chunk_size: int = 100000) -> OllamaCli
             max_article_characters=24000,
             chunked_summarization=chunked,
             summary_chunk_characters=chunk_size,
+            max_summary_chunks=max_chunks,
         )
     )
 

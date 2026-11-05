@@ -6,6 +6,7 @@ import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from article_briefing.config import Settings
 from article_briefing.email_delivery import EmailDeliveryError, render_html, render_plain_text
@@ -16,7 +17,7 @@ from article_briefing.models import (
     FailureReport,
     RelevanceDecision,
 )
-from article_briefing.ollama import OllamaError, OllamaOutputError
+from article_briefing.ollama import OllamaClient, OllamaError, OllamaOutputError
 from article_briefing.processor import ProcessingError, process_landing_folder
 
 
@@ -105,6 +106,88 @@ class RelevanceRetrySummarizer(FakeSummarizer):
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_chunk_limit_is_saved_and_rendered_in_the_briefing(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = replace(
+                make_settings(Path(directory)),
+                chunked_summarization=True,
+                summary_chunk_characters=10,
+                max_summary_chunks=1,
+            )
+            settings.landing_dir.mkdir(parents=True)
+            source = settings.landing_dir / "article.txt"
+            source.write_text("abcdefghijABCDEFGHIJ", encoding="utf-8")
+            client = OllamaClient(settings)
+            sender = FakeSender(source)
+            responses = [
+                ({"include": True, "reason": "Relevant."}, ""),
+                ({"summary": "First"}, ""),
+                ({
+                    "summary": "Partial summary.",
+                    "why_it_matters": "It matters.",
+                    "read_recommendation": "Read it.",
+                    "relevance_score": 8,
+                }, ""),
+            ]
+            with patch.object(client, "_request_json", side_effect=responses) as request:
+                result = process_landing_folder(settings, client, sender=sender)
+
+            self.assertEqual(request.call_count, 3)
+            self.assertTrue(all(
+                "ABCDEFGHIJ" not in call.kwargs["user_prompt"]
+                for call in request.call_args_list
+            ))
+            assert result.briefing_path is not None
+            payload = json.loads((result.briefing_path / "briefing.json").read_text())
+            self.assertTrue(payload["articles"][0]["chunk_limit_reached"])
+            markdown = (result.briefing_path / "briefing.md").read_text()
+            self.assertIn("[article](<article-summaries/article.md>) \\*", markdown)
+            self.assertIn("Chunk limit reached", markdown)
+            individual = (result.briefing_path / "article-summaries" / "article.md").read_text()
+            self.assertIn("chunk limit was reached", individual)
+            self.assertIsInstance(sender.briefing, Briefing)
+            assert isinstance(sender.briefing, Briefing)
+            for body in (render_plain_text(sender.briefing), render_html(sender.briefing)):
+                self.assertIn("article *", body)
+                self.assertIn("Chunk limit reached", body)
+
+    def test_chunk_limit_is_marked_for_relevance_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            settings = replace(
+                make_settings(Path(directory)),
+                chunked_summarization=True,
+                summary_chunk_characters=10,
+                max_summary_chunks=1,
+            )
+            settings.landing_dir.mkdir(parents=True)
+            source = settings.landing_dir / "article.txt"
+            source.write_text("abcdefghijABCDEFGHIJ", encoding="utf-8")
+            client = OllamaClient(settings)
+            sender = FakeSender(source)
+            responses = [({"include": "invalid", "reason": "bad"}, "bad")] * 3 + [
+                ({"summary": "First"}, ""),
+                ({
+                    "summary": "Partial summary.",
+                    "why_it_matters": "It matters.",
+                    "read_recommendation": "Read it.",
+                    "relevance_score": 8,
+                }, ""),
+            ]
+            with patch.object(client, "_request_json", side_effect=responses):
+                result = process_landing_folder(settings, client, sender=sender)
+
+            assert result.briefing_path is not None
+            payload = json.loads((result.briefing_path / "briefing.json").read_text())
+            self.assertTrue(payload["relevance_failures"][0]["summary"]["chunk_limit_reached"])
+            markdown = (result.briefing_path / "briefing.md").read_text()
+            self.assertIn("### article \\*", markdown)
+            self.assertIn("Chunk limit reached", markdown)
+            self.assertIsInstance(sender.briefing, Briefing)
+            assert isinstance(sender.briefing, Briefing)
+            for body in (render_plain_text(sender.briefing), render_html(sender.briefing)):
+                self.assertIn("article *", body)
+                self.assertIn("Chunk limit reached", body)
+
     def test_articles_are_sorted_by_score_in_all_outputs(self) -> None:
         class ScoredSummarizer(FakeSummarizer):
             def summarize_article(self, article: Article) -> ArticleSummary:

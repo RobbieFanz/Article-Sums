@@ -178,16 +178,27 @@ made.
 
 ### Long articles
 
-Set `CHUNKED_SUMMARIZATION=true` to process the entire article without the
+Set `CHUNKED_SUMMARIZATION=true` to use chunking instead of the
 `MAX_ARTICLE_CHARACTERS` truncation. Articles longer than
 `SUMMARY_CHUNK_CHARACTERS` are split into large chunks, each chunk is
 summarized independently, and the chunk summaries are combined into the normal
 article summary. An article of N chunks normally needs N+1 summary requests;
 extra combining requests are used if the chunk summaries themselves exceed the
-chunk limit. Shorter articles use one summary request. Relevance filtering still
-uses only its configured excerpt.
+per-chunk character limit. Shorter articles use one summary request.
 
-The default chunk limit is 9,500 characters, chosen for a 4,096-token context.
+`MAX_SUMMARY_CHUNKS` limits how many article chunks are summarized, defaulting
+to `10`. Set it to `0` for unlimited chunks, or to another non-negative integer
+to choose a limit. When an article has more chunks than the limit, only the
+first chunks are used for relevance triage and the final summary; the rest is
+not sent to the model. The email and briefing mark the article with `*` and
+explain that its summary is incomplete. An article with exactly the configured
+number of chunks is not marked, since no text was omitted. This limit does not
+apply when chunking is disabled.
+
+Relevance filtering still uses only its configured excerpt, which may be
+shorter than the capped chunked input.
+
+The default per-chunk character limit is 9,500, chosen for a 4,096-token context.
 Characters are not tokens, and prompts and model responses also consume
 context. Adjust `SUMMARY_CHUNK_CHARACTERS` for the allocated context and text;
 even the default does not guarantee that a request fits. Increase it for a
@@ -269,8 +280,9 @@ contains URLs, which may themselves be sensitive.
 | `BRIEFING_DIR` | No | Generated briefing directory, default `data/briefings` |
 | `ARTICLE_HISTORY_PATH` | No | SQLite article history, default `data/article-history.sqlite3` |
 | `MAX_ARTICLE_CHARACTERS` | No | Per-article input cap when chunking is disabled, default `24000` |
-| `CHUNKED_SUMMARIZATION` | No | Enable full-article chunking, default `false`; `.env.example` enables it |
+| `CHUNKED_SUMMARIZATION` | No | Enable chunked summarization, default `false`; `.env.example` enables it |
 | `SUMMARY_CHUNK_CHARACTERS` | No | Approximate per-chunk character limit, default `9500` |
+| `MAX_SUMMARY_CHUNKS` | No | Maximum article chunks to summarize, default `10`; `0` means unlimited |
 | `RELEVANCE_CRITERIA_FILE` | No | Criteria text file for AI relevance filtering |
 | `RELEVANCE_MAX_ARTICLE_CHARACTERS` | No | Article excerpt used for relevance triage, default `6000` |
 | `SMTP_ENABLED` | No | Set to `true` to email a successfully generated briefing |

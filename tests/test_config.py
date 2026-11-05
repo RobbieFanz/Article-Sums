@@ -19,17 +19,30 @@ class ChunkSettingsTests(unittest.TestCase):
                 "RELEVANCE_CRITERIA_FILE": "criteria.txt",
                 "CHUNKED_SUMMARIZATION": "true",
                 "SUMMARY_CHUNK_CHARACTERS": "32000",
+                "MAX_SUMMARY_CHUNKS": "3",
                 "ARTICLE_HISTORY_PATH": "other/history.sqlite3",
             }
             with patch.dict(os.environ, environment, clear=True):
                 settings = Settings.from_loaded_environment(root)
                 self.assertTrue(settings.chunked_summarization)
                 self.assertEqual(settings.summary_chunk_characters, 32000)
+                self.assertEqual(settings.max_summary_chunks, 3)
                 self.assertEqual(settings.history_path, root / "other" / "history.sqlite3")
+
+            for value in ("0", "999999999999999999999999999"):
+                with self.subTest(value=value):
+                    with patch.dict(os.environ, {**environment, "MAX_SUMMARY_CHUNKS": value}, clear=True):
+                        self.assertEqual(Settings.from_loaded_environment(root).max_summary_chunks, int(value))
+
+            with patch.dict(os.environ, {"OLLAMA_MODEL": "test", "RELEVANCE_CRITERIA_FILE": "criteria.txt"}, clear=True):
+                self.assertEqual(Settings.from_loaded_environment(root).max_summary_chunks, 10)
 
             for variable, value in (
                 ("CHUNKED_SUMMARIZATION", "maybe"),
                 ("SUMMARY_CHUNK_CHARACTERS", "0"),
+                ("MAX_SUMMARY_CHUNKS", "-1"),
+                ("MAX_SUMMARY_CHUNKS", "invalid"),
+                ("MAX_SUMMARY_CHUNKS", "1.5"),
             ):
                 with self.subTest(variable=variable):
                     with patch.dict(os.environ, {**environment, variable: value}, clear=True):

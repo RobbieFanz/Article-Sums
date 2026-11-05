@@ -84,6 +84,7 @@ class Settings:
     chunked_summarization: bool = False
     summary_chunk_characters: int = 9500
     history_path: Path | None = None
+    max_summary_chunks: int = 10
 
     @classmethod
     def from_environment(cls, project_root: Path) -> "Settings":
@@ -129,6 +130,7 @@ class Settings:
             smtp=smtp if smtp is not None else SmtpSettings.from_environment(),
             chunked_summarization=boolean_environment("CHUNKED_SUMMARIZATION", False),
             summary_chunk_characters=positive_integer("SUMMARY_CHUNK_CHARACTERS", 9500),
+            max_summary_chunks=nonnegative_integer("MAX_SUMMARY_CHUNKS", 10),
             history_path=resolve_project_path(
                 project_root, os.getenv("ARTICLE_HISTORY_PATH", str(DEFAULT_HISTORY_PATH))
             ),
@@ -184,6 +186,17 @@ def positive_integer(name: str, default: int) -> int:
         raise ConfigurationError(f"{name} must be a positive integer.") from error
     if parsed <= 0:
         raise ConfigurationError(f"{name} must be greater than zero.")
+    return parsed
+
+
+def nonnegative_integer(name: str, default: int) -> int:
+    value = os.getenv(name, str(default))
+    try:
+        parsed = int(value)
+    except ValueError as error:
+        raise ConfigurationError(f"{name} must be a non-negative integer.") from error
+    if parsed < 0:
+        raise ConfigurationError(f"{name} must be a non-negative integer.")
     return parsed
 
 

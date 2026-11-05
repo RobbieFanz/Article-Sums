@@ -82,11 +82,15 @@ def render_plain_text(briefing: Briefing) -> str:
         "",
         "ARTICLE SUMMARIES",
     ]
+    if any(article.chunk_limit_reached for article in briefing.articles) or any(
+        failure.summary.chunk_limit_reached for failure in briefing.relevance_failures
+    ):
+        lines.extend(["", "* Chunk limit reached; remaining article text was not summarized."])
     for article in briefing.articles:
         lines.extend(
             [
                 "",
-                article.title,
+                f"{article.title}{' *' if article.chunk_limit_reached else ''}",
                 f"Original article: {article.url or 'unavailable'}",
                 f"Relevance score: {format_relevance_score(article.relevance_score)}",
                 f"Summarization time: {format_seconds(article.summarization_duration_seconds)}",
@@ -135,6 +139,12 @@ def render_plain_text(briefing: Briefing) -> str:
 
 def render_html(briefing: Briefing) -> str:
     article_sections = "".join(render_article_html(article) for article in briefing.articles)
+    chunk_limit_note = (
+        "<p>* Chunk limit reached; remaining article text was not summarized.</p>"
+        if any(article.chunk_limit_reached for article in briefing.articles)
+        or any(failure.summary.chunk_limit_reached for failure in briefing.relevance_failures)
+        else ""
+    )
     relevance_failure_sections = "".join(
         render_relevance_failure_html(failure)
         for failure in briefing.relevance_failures
@@ -176,6 +186,7 @@ def render_html(briefing: Briefing) -> str:
     <strong>Briefing generation time:</strong>
     {html.escape(format_seconds(briefing.generation_duration_seconds))}</p>
     <h2>Article summaries</h2>
+    {chunk_limit_note}
     {article_sections}
     {not_selected_sections}
     {relevance_failure_sections}
@@ -186,7 +197,7 @@ def render_html(briefing: Briefing) -> str:
 
 
 def render_article_html(article: ArticleSummary) -> str:
-    article_title = html.escape(article.title)
+    article_title = html.escape(article.title) + (" *" if article.chunk_limit_reached else "")
     source = (
         f'<a href="{html.escape(article.url, quote=True)}">Original article</a>'
         if article.url
@@ -217,7 +228,8 @@ def render_relevance_failure_plain_text(failure: RelevanceFailure) -> list[str]:
     summary = failure.summary
     lines = [
         "",
-        f"WARNING: Relevance triage failed — {summary.title}",
+        f"WARNING: Relevance triage failed — {summary.title}"
+        f"{' *' if summary.chunk_limit_reached else ''}",
         f"Original article: {summary.url or 'unavailable'}",
         f"Relevance score: {format_relevance_score(summary.relevance_score)}",
         f"Summarization time: {format_seconds(summary.summarization_duration_seconds)}",
@@ -244,7 +256,7 @@ def render_relevance_failure_html(failure: RelevanceFailure) -> str:
     )
     return f"""\
 <section style="margin-top: 24px; border-top: 2px solid #b91c1c; padding-top: 16px;">
-  <h2>Relevance triage warning: {html.escape(summary.title)}</h2>
+  <h2>Relevance triage warning: {html.escape(summary.title)}{' *' if summary.chunk_limit_reached else ''}</h2>
   <p>This article is excluded from the main briefing because the model returned
   invalid relevance output after 3 attempts.</p>
   <p>{source}<br>

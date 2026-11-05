@@ -42,11 +42,23 @@ class OllamaClient:
         )
         content = article.text
         content_label = "ARTICLE CONTENT"
+        chunk_limit_reached = False
         if (
             self._settings.chunked_summarization
             and len(content) > self._settings.summary_chunk_characters
         ):
-            chunks = split_article_text(content, self._settings.summary_chunk_characters)
+            chunks = split_article_text(
+                content,
+                self._settings.summary_chunk_characters,
+                self._settings.max_summary_chunks,
+            )
+            chunk_limit_reached = sum(len(chunk) for chunk in chunks) < len(content)
+            if chunk_limit_reached:
+                input_note = (
+                    "The chunk limit was reached; the rest of the article was not "
+                    "included in the summary."
+                )
+                logger.info("Chunk limit reached for %s; remaining text omitted.", article.source_file)
             logger.info(
                 "Summarizing %s in %d chunks of at most %d characters.",
                 article.source_file,
@@ -100,6 +112,7 @@ class OllamaClient:
             input_note=input_note,
             summarization_duration_seconds=perf_counter() - started_at,
             relevance_score=optional_relevance_score(response, article.source_file),
+            chunk_limit_reached=chunk_limit_reached,
         )
 
     def _summarize_part(self, article: Article, content: str, label: str) -> str:
@@ -151,7 +164,16 @@ class OllamaClient:
 
     def assess_relevance(self, article: Article) -> RelevanceDecision:
         started_at = perf_counter()
-        relevance_text = article.text[: self._settings.relevance_max_article_characters]
+        content = article.text
+        if self._settings.chunked_summarization and self._settings.max_summary_chunks:
+            content = "".join(
+                split_article_text(
+                    content,
+                    self._settings.summary_chunk_characters,
+                    self._settings.max_summary_chunks,
+                )
+            )
+        relevance_text = content[: self._settings.relevance_max_article_characters]
         logger.info(
             "Relevance input for %s: %d of %d loaded article characters.",
             article.source_file,
@@ -163,7 +185,7 @@ class OllamaClient:
             if len(relevance_text) == len(article.text)
             else (
                 "Only the first "
-                f"{self._settings.relevance_max_article_characters:,} characters are "
+                f"{len(relevance_text):,} characters are "
                 "included for relevance triage."
             )
         )
@@ -285,10 +307,10 @@ class OllamaClient:
         return parsed, content
 
 
-def split_article_text(text: str, limit: int) -> list[str]:
+def split_article_text(text: str, limit: int, max_chunks: int = 0) -> list[str]:
     chunks: list[str] = []
     start = 0
-    while len(text) - start > limit:
+    while len(text) - start > limit and (not max_chunks or len(chunks) < max_chunks):
         end = start + limit
         remaining_chunks = (len(text) - start + limit - 1) // limit
         earliest = max(start + limit // 2, len(text) - (remaining_chunks - 1) * limit)
@@ -299,7 +321,7 @@ def split_article_text(text: str, limit: int) -> list[str]:
             end = boundary + (2 if text[boundary:boundary + 2] == "\n\n" else 1)
         chunks.append(text[start:end])
         start = end
-    if start < len(text):
+    if start < len(text) and (not max_chunks or len(chunks) < max_chunks):
         chunks.append(text[start:])
     return chunks
 

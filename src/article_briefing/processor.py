@@ -532,15 +532,23 @@ def render_markdown(payload: dict[str, object]) -> str:
     ]
     articles = payload["articles"]
     assert isinstance(articles, list)
+    relevance_failures = payload["relevance_failures"]
+    assert isinstance(relevance_failures, list)
     lines.extend(["", "## Article summaries", ""])
+    if any(article["chunk_limit_reached"] for article in articles) or any(
+        failure["summary"]["chunk_limit_reached"]
+        for failure in relevance_failures
+    ):
+        lines.extend(["\\* Chunk limit reached; remaining article text was not summarized.", ""])
     if articles:
         for article in articles:
             assert isinstance(article, dict)
             score = article["relevance_score"]
             assert score is None or isinstance(score, int)
             filename = f"{Path(article['source_file']).stem}.md"
+            marker = " \\*" if article["chunk_limit_reached"] else ""
             lines.append(
-                f"- [{article['title']}](<article-summaries/{filename}>) "
+                f"- [{article['title']}](<article-summaries/{filename}>){marker} "
                 f"— Relevance: {format_relevance_score(score)}"
             )
     else:
@@ -570,8 +578,6 @@ def render_markdown(payload: dict[str, object]) -> str:
                 *[f"- {warning}" for warning in skipped_files],
             ]
         )
-    relevance_failures = payload["relevance_failures"]
-    assert isinstance(relevance_failures, list)
     if relevance_failures:
         lines.extend(
             [
@@ -588,10 +594,11 @@ def render_markdown(payload: dict[str, object]) -> str:
             invalid_outputs = failure["invalid_outputs"]
             assert isinstance(summary, dict)
             assert isinstance(invalid_outputs, list)
+            marker = " \\*" if summary["chunk_limit_reached"] else ""
             lines.extend(
                 [
                     "",
-                    f"### {summary['title']}",
+                    f"### {summary['title']}{marker}",
                     "",
                     f"**Relevance score:** {format_relevance_score(summary['relevance_score'])}",
                     "",

@@ -24,6 +24,7 @@ class ArticleSummary:
     input_note: str
     summarization_duration_seconds: float = 0.0
     relevance_score: int | None = None
+    chunk_limit_reached: bool = False
 
     def as_dict(self) -> dict[str, object]:
         return asdict(self)

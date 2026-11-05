@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from unittest.mock import MagicMock, patch
 
 from article_briefing.config import SmtpSettings
-from article_briefing.email_delivery import SmtpBriefingSender, render_plain_text
+from article_briefing.email_delivery import SmtpBriefingSender, render_html, render_plain_text
 from article_briefing.models import (
     ArticleSummary,
     ArticleNotSelected,
@@ -62,6 +63,27 @@ class SmtpBriefingSenderTests(unittest.TestCase):
         self.assertIn("Summarization time: 0 minutes 3.2 seconds", body)
         self.assertIn("Relevance score: 8/10", body)
 
+    def test_chunk_limit_marker_and_legend_in_both_email_formats(self) -> None:
+        briefing = make_briefing()
+        limited = replace(briefing.articles[0], title="Limited <article>", chunk_limit_reached=True)
+        briefing = replace(
+            briefing,
+            articles=[limited, briefing.articles[0]],
+            relevance_failures=[RelevanceFailure(summary=limited, invalid_outputs=["bad"])],
+        )
+        text = render_plain_text(briefing)
+        html = render_html(briefing)
+        self.assertIn("Limited <article> *", text)
+        self.assertIn("Relevance triage failed — Limited <article> *", text)
+        self.assertIn("<h3>Limited &lt;article&gt; *</h3>", html)
+        self.assertIn("Relevance triage warning: Limited &lt;article&gt; *", html)
+        for body in (text, html):
+            self.assertIn("* Chunk limit reached; remaining article text was not summarized.", body)
+            self.assertNotIn("Example Article *", body)
+
+        for body in (render_plain_text(make_briefing()), render_html(make_briefing())):
+            self.assertNotIn("* Chunk limit reached", body)
+
     def test_plain_text_lists_articles_not_included(self) -> None:
         briefing = make_briefing()
         briefing = Briefing(
@@ -104,10 +126,6 @@ class SmtpBriefingSenderTests(unittest.TestCase):
         self.assertIn("Invalid output two", body)
 
     def test_not_selected_articles_render_links_reasons_and_escape_html(self) -> None:
-        from dataclasses import replace
-
-        from article_briefing.email_delivery import render_html
-
         briefing = replace(
             make_briefing(),
             articles_not_selected=[
